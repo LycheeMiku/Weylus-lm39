@@ -61,8 +61,11 @@ impl WinCtx {
         unsafe {
             union = mem::zeroed();
             let factory = create_dxgi_factory_1();
-            let mut adapter = ptr::null_mut();
-            if factory.EnumAdapters1(0, &mut adapter) != DXGI_ERROR_NOT_FOUND {
+            for a in 0.. {
+                let mut adapter = ptr::null_mut();
+                if factory.EnumAdapters1(a, &mut adapter) == DXGI_ERROR_NOT_FOUND {
+                    break;
+                }
                 let adp = ComPtr::from_raw(adapter);
                 let outputs = get_adapter_outputs(&adp);
                 for o in outputs {

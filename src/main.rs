@@ -1,4 +1,5 @@
 #![cfg_attr(feature = "bench", feature(test))]
+#![windows_subsystem = "windows"]
 #[cfg(feature = "bench")]
 extern crate test;
 
@@ -11,7 +12,7 @@ use clap_complete::generate;
 use signal_hook::iterator::Signals;
 #[cfg(unix)]
 use signal_hook::{consts::TERM_SIGNALS, low_level::signal_name};
-use tracing::{error, info, warn};
+use tracing::warn;
 
 use std::sync::mpsc;
 
@@ -30,6 +31,11 @@ mod websocket;
 mod weylus;
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        winapi::um::wincon::AttachConsole(winapi::um::wincon::ATTACH_PARENT_PROCESS);
+    }
+
     let (sender, receiver) = mpsc::sync_channel::<String>(100);
 
     log::setup_logging(sender);
@@ -83,6 +89,7 @@ fn main() {
             web::Web2UiMessage::UInputInaccessible => {
                 warn!(std::include_str!("strings/uinput_error.txt"))
             }
+            _ => {}
         });
         #[cfg(unix)]
         {

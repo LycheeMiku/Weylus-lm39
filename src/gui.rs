@@ -1,217 +1,431 @@
 use std::cmp::min;
 use std::io::Cursor;
-use std::iter::Iterator;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::AtomicBool;
-
-use fltk::app;
-use fltk::enums::{FrameType, LabelType};
-use fltk::image::PngImage;
-use fltk::menu::Choice;
 use std::sync::{mpsc, Arc, Mutex};
 use tracing::{error, info, warn};
 
 use fltk::{
     app::{awake_callback, App},
     button::{Button, CheckButton},
+    enums::{Color, Font, FrameType, LabelType},
     frame::Frame,
+    image::PngImage,
     input::{Input, IntInput},
+    menu::Choice,
     output::Output,
     prelude::*,
-    text::{TextBuffer, TextDisplay},
+    text::{StyleTableEntry, TextBuffer, TextDisplay},
     window::Window,
 };
 
-#[cfg(not(target_os = "windows"))]
-use pnet_datalink as datalink;
-
 use crate::config::{write_config, Config, ThemeType};
 use crate::protocol::{CustomInputAreas, Rect};
-use crate::web::Web2UiMessage::UInputInaccessible;
+use crate::web::Web2UiMessage;
+
+fn get_lan_ip(bind_addr: IpAddr) -> IpAddr {
+    if !bind_addr.is_unspecified() {
+        return bind_addr;
+    }
+    // Probe local route via UDP socket
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                let ip = addr.ip();
+                if !ip.is_loopback() && !ip.is_unspecified() {
+                    return ip;
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        for iface in pnet_datalink::interfaces()
+            .iter()
+            .filter(|iface| iface.is_up() && !iface.is_loopback())
+        {
+            for ipnetw in &iface.ips {
+                if ipnetw.is_ipv4() {
+                    return ipnetw.ip();
+                }
+            }
+        }
+    }
+    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+}
+
+fn render_qr_to_frame(qr_frame: &mut Frame, url: &str, size: i32) {
+    if let Ok(code) = qrcode::QrCode::new(url) {
+        let img_buf = code.render::<image::Luma<u8>>().build();
+        let image = image::DynamicImage::ImageLuma8(img_buf);
+        let dims = size.max(100) as u32;
+        let image = image.resize_exact(dims, dims, image::imageops::FilterType::Nearest);
+        let mut buf = vec![];
+        let mut cursor = Cursor::new(&mut buf);
+        if image.write_to(&mut cursor, image::ImageFormat::Png).is_ok() {
+            if let Ok(png) = PngImage::from_data(&buf) {
+                qr_frame.set_image(Some(png));
+                qr_frame.redraw();
+            }
+        }
+    }
+}
+
+fn open_url(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::CString;
+        if let (Ok(u), Ok(op)) = (CString::new(url), CString::new("open")) {
+            unsafe {
+                winapi::um::shellapi::ShellExecuteA(
+                    std::ptr::null_mut(),
+                    op.as_ptr(),
+                    u.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    winapi::um::winuser::SW_SHOWNORMAL,
+                );
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+}
 
 pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
-    let width = 200;
-    let height = 30;
-    let padding = 10;
+    let width = 170;
+    let height = 24;
 
     let app = App::default().with_scheme(fltk::app::AppScheme::Gtk);
     config.gui_theme.map(|th| th.apply());
+
+    let initial_height = if config.enable_log { 536 } else { 304 };
     let mut wind = Window::default()
-        .with_size(660, 600)
+        .with_size(660, initial_height)
         .center_screen()
-        .with_label(&format!("Weylus - {}", env!("CARGO_PKG_VERSION")));
+        .with_label(&format!("Weylus - Graphics Tablet v{}", env!("CARGO_PKG_VERSION")));
     wind.set_xclass("weylus");
     wind.set_callback(move |_win| app.quit());
+    wind.size_range(660, initial_height, 660, if config.enable_log { 0 } else { 304 });
 
+    // Left Column: Server settings & control
     let mut input_access_code = Input::default()
-        .with_pos(130, 30)
+        .with_pos(110, 16)
         .with_size(width, height)
-        .with_label("Access code");
-    input_access_code.set_tooltip(
-        "Restrict who can control your computer with an access code. Note that this does NOT do \
-        any kind of encryption and it is advised to only run Weylus inside trusted networks! Do \
-        NOT reuse any of your passwords! If left blank, no code is required to access Weylus \
-        remotely.",
-    );
+        .with_label("Access Code");
     if let Some(code) = config.access_code.as_ref() {
         input_access_code.set_value(code);
     }
 
     let mut input_bind_addr = Input::default()
+        .with_pos(110, 46)
         .with_size(width, height)
-        .below_of(&input_access_code, padding)
-        .with_label("Bind Address");
+        .with_label("Bind Addr");
     input_bind_addr.set_value(&config.bind_address.to_string());
 
     let mut input_port = IntInput::default()
+        .with_pos(110, 76)
         .with_size(width, height)
-        .below_of(&input_bind_addr, padding)
         .with_label("Port");
     input_port.set_value(&config.web_port.to_string());
 
-    let mut check_auto_start = CheckButton::default()
-        .with_size(70, height)
-        .below_of(&input_port, padding + 5)
-        .with_label("Auto Start");
-    check_auto_start.set_tooltip("Start Weylus server immediately on program start.");
-    check_auto_start.set_checked(config.auto_start);
-
-    #[cfg(target_os = "linux")]
-    let mut check_wayland = CheckButton::default()
-        .with_size(70, height)
-        .right_of(&check_auto_start, 3 * padding)
-        .with_label("Wayland/\nPipeWire\nSupport");
-    #[cfg(target_os = "linux")]
-    {
-        check_wayland.set_tooltip(
-            "EXPERIMENTAL! This may crash your desktop! Enables screen \
-        capturing for Wayland using PipeWire and GStreamer.",
-        );
-        check_wayland.set_checked(config.wayland_support);
-    }
-
-    let mut label_hw_accel = Frame::default()
-        .with_size(width, height)
-        .below_of(&check_auto_start, padding)
-        .with_label("Try Hardware acceleration");
-    label_hw_accel.set_tooltip(
-        "On many systems video encoding can be done with hardware \
-        acceleration. By default this is disabled as the quality and stability of video encoding \
-        varies greatly among hardware and drivers. Currently this is only supported on Linux.",
-    );
-
-    let mut check_native_hw_accel = CheckButton::default()
-        .with_size(70, height)
-        .below_of(&label_hw_accel, 0);
-
-    #[cfg(target_os = "linux")]
-    {
-        check_native_hw_accel.set_label("VAAPI");
-        check_native_hw_accel
-            .set_tooltip("Try to use hardware acceleration through the Video Acceleration API.");
-        check_native_hw_accel.set_checked(config.try_vaapi);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        check_native_hw_accel.set_label("VideoToolbox");
-        check_native_hw_accel
-            .set_tooltip("Try to use hardware acceleration through the VideoToolbox API.");
-        check_native_hw_accel.set_checked(config.try_videotoolbox);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        check_native_hw_accel.set_label("Media-\nFoundation");
-        check_native_hw_accel
-            .set_tooltip("Try to use hardware acceleration through the MediaFoundation API.");
-        check_native_hw_accel.set_checked(config.try_mediafoundation);
-    }
-
-    let mut check_nvenc = CheckButton::default()
-        .with_size(70, height)
-        .right_of(&check_native_hw_accel, 2 * padding)
-        .with_label("NVENC");
-    check_nvenc.set_tooltip("Try to use Nvidia's NVENC to encode the video via GPU.");
-
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    check_nvenc.set_checked(config.try_nvenc);
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        check_nvenc.deactivate();
-        check_nvenc.hide();
-    }
-
-    let mut but_toggle = Button::default()
-        .with_size(width, height)
-        .below_of(&check_native_hw_accel, 2 * padding)
-        .with_label("Start");
-
-    let mut output_server_addr = Output::default()
-        .with_size(500, height)
-        .below_of(&but_toggle, 3 * padding)
-        .with_label("Connect your\ntablet to:");
-    output_server_addr.hide();
-
-    let output_buf = TextBuffer::default();
-    let mut output = TextDisplay::default().with_size(600, 6 * height).with_pos(
-        30,
-        output_server_addr.y() + output_server_addr.height() + padding,
-    );
-    output.set_buffer(output_buf);
-    let output_buf = output.buffer().unwrap();
-
     let mut choice_theme = Choice::default()
+        .with_pos(110, 106)
         .with_size(width, height)
-        .right_of(&input_access_code, padding);
-
+        .with_label("Theme");
     for theme in ThemeType::themes() {
         choice_theme.add_choice(&theme.name());
     }
-    choice_theme.set_value(config.gui_theme.unwrap_or(ThemeType::default()).to_index());
+    choice_theme.set_value(config.gui_theme.unwrap_or_default().to_index());
 
+    let check_auto_start = CheckButton::default()
+        .with_pos(110, 136)
+        .with_size(90, 22)
+        .with_label("Auto Start");
+    check_auto_start.set_checked(config.auto_start);
+
+    let mut check_enable_log = CheckButton::default()
+        .with_pos(205, 136)
+        .with_size(85, 22)
+        .with_label("Show Log");
+    check_enable_log.set_checked(config.enable_log);
+
+    let mut but_toggle = Button::default()
+        .with_pos(110, 164)
+        .with_size(width, 32)
+        .with_label("Start");
+
+    // Project Links (Upstream & Fork)
+    let mut link_sep = Frame::default()
+        .with_pos(20, 204)
+        .with_size(270, 1);
+    link_sep.set_frame(FrameType::EngravedFrame);
+
+    let mut but_upstream = Button::default()
+        .with_pos(20, 212)
+        .with_size(270, 22)
+        .with_label("🔗 原项目: github.com/H-M-H/Weylus");
+    but_upstream.set_frame(FrameType::FlatBox);
+    but_upstream.set_label_size(11);
+    but_upstream.set_label_color(Color::from_rgb(37, 99, 235));
+    but_upstream.set_tooltip("https://github.com/H-M-H/Weylus");
+    but_upstream.set_callback(|_| {
+        open_url("https://github.com/H-M-H/Weylus");
+    });
+
+    let mut but_fork = Button::default()
+        .with_pos(20, 238)
+        .with_size(270, 22)
+        .with_label("🔗 Fork: github.com/LycheeMiku/Weylus-lm39");
+    but_fork.set_frame(FrameType::FlatBox);
+    but_fork.set_label_size(11);
+    but_fork.set_label_color(Color::from_rgb(37, 99, 235));
+    but_fork.set_tooltip("https://github.com/LycheeMiku/Weylus-lm39");
+    but_fork.set_callback(|_| {
+        open_url("https://github.com/LycheeMiku/Weylus-lm39");
+    });
+
+    // Right Column: QR Code & Connection Info
     let mut qr_frame = Frame::default()
-        .with_size(235, 235)
-        .right_of(&input_bind_addr, padding);
+        .with_pos(340, 16)
+        .with_size(210, 210);
+    qr_frame.set_frame(FrameType::BorderFrame);
 
-    qr_frame.hide();
+    let output_server_addr = Output::default()
+        .with_pos(340, 234)
+        .with_size(210, 26);
 
-    wind.make_resizable(true);
+    let mut but_copy_url = Button::default()
+        .with_pos(558, 234)
+        .with_size(72, 26)
+        .with_label("Copy");
+
+    let mut status_frame = Frame::default()
+        .with_pos(340, 268)
+        .with_size(290, 22)
+        .with_label("● Server Stopped");
+    status_frame.set_label_color(Color::from_rgb(160, 160, 160));
+    status_frame.set_label_size(12);
+
+    // Closure to pin all top panel widgets to their exact pixel coordinates
+    let mut reset_top_widgets = {
+        let mut input_access_code = input_access_code.clone();
+        let mut input_bind_addr = input_bind_addr.clone();
+        let mut input_port = input_port.clone();
+        let mut choice_theme = choice_theme.clone();
+        let mut check_auto_start = check_auto_start.clone();
+        let mut check_enable_log = check_enable_log.clone();
+        let mut but_toggle = but_toggle.clone();
+        let mut link_sep = link_sep.clone();
+        let mut but_upstream = but_upstream.clone();
+        let mut but_fork = but_fork.clone();
+        let mut qr_frame = qr_frame.clone();
+        let mut output_server_addr = output_server_addr.clone();
+        let mut but_copy_url = but_copy_url.clone();
+        let mut status_frame = status_frame.clone();
+
+        move || {
+            input_access_code.resize(110, 16, 170, 24);
+            input_bind_addr.resize(110, 46, 170, 24);
+            input_port.resize(110, 76, 170, 24);
+            choice_theme.resize(110, 106, 170, 24);
+            check_auto_start.resize(110, 136, 90, 22);
+            check_enable_log.resize(205, 136, 85, 22);
+            but_toggle.resize(110, 164, 170, 32);
+            link_sep.resize(20, 204, 270, 1);
+            but_upstream.resize(20, 212, 270, 22);
+            but_fork.resize(20, 238, 270, 22);
+            qr_frame.resize(340, 16, 210, 210);
+            output_server_addr.resize(340, 234, 210, 26);
+            but_copy_url.resize(558, 234, 72, 26);
+            status_frame.resize(340, 268, 290, 22);
+        }
+    };
+
+    // Bottom: Log output with color highlighting
+    let output_buf = TextBuffer::default();
+    let style_buf = TextBuffer::default();
+    let mut output = TextDisplay::default()
+        .with_pos(20, 304)
+        .with_size(620, 220);
+
+    let style_table = vec![
+        // 'A': Default
+        StyleTableEntry {
+            color: Color::from_rgb(228, 228, 231),
+            font: Font::Courier,
+            size: 12,
+        },
+        // 'B': DEBUG (Sky Blue)
+        StyleTableEntry {
+            color: Color::from_rgb(96, 165, 250),
+            font: Font::CourierBold,
+            size: 12,
+        },
+        // 'C': INFO (Soft Green)
+        StyleTableEntry {
+            color: Color::from_rgb(74, 222, 128),
+            font: Font::Courier,
+            size: 12,
+        },
+        // 'D': WARN (Amber / Orange)
+        StyleTableEntry {
+            color: Color::from_rgb(251, 191, 36),
+            font: Font::CourierBold,
+            size: 12,
+        },
+        // 'E': ERROR (Bright Red)
+        StyleTableEntry {
+            color: Color::from_rgb(248, 113, 113),
+            font: Font::CourierBold,
+            size: 12,
+        },
+    ];
+
+    output.set_buffer(output_buf);
+    output.set_highlight_data(style_buf.clone(), style_table);
+    output.set_color(Color::from_rgb(24, 24, 27));
+    output.set_text_color(Color::from_rgb(228, 228, 231));
+    output.set_text_font(Font::Courier);
+    output.set_text_size(12);
+    output.wrap_mode(fltk::text::WrapMode::AtBounds, 0);
+
+    if !config.enable_log {
+        output.hide();
+    }
+
+    let output_buf = output.buffer().unwrap();
+
+    wind.resizable(&output);
     wind.end();
     wind.show();
+    reset_top_widgets();
+    wind.init_sizes();
 
-    let output_buf = Arc::new(Mutex::new(output_buf));
+    let is_log_enabled = Arc::new(std::sync::atomic::AtomicBool::new(config.enable_log));
+    let log_bufs = Arc::new(Mutex::new((output_buf, style_buf)));
 
-    std::thread::spawn(move || {
-        while let Ok(log_message) = log_receiver.recv() {
-            let mut output_buf = output_buf.lock().unwrap();
-            output_buf.append(&log_message);
-        }
-    });
+    {
+        let is_log_enabled = is_log_enabled.clone();
+        let log_bufs = log_bufs.clone();
+        std::thread::spawn(move || {
+            while let Ok(log_message) = log_receiver.recv() {
+                if is_log_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    let style_char = if log_message.contains("ERROR") || log_message.contains("error") {
+                        'E'
+                    } else if log_message.contains("WARN") || log_message.contains("warn") {
+                        'D'
+                    } else if log_message.contains("DEBUG") || log_message.contains("debug") {
+                        'B'
+                    } else if log_message.contains("INFO") || log_message.contains("info") {
+                        'C'
+                    } else {
+                        'A'
+                    };
+                    let style_line = style_char.to_string().repeat(log_message.len());
+                    let mut bufs = log_bufs.lock().unwrap();
+                    bufs.1.append(&style_line);
+                    bufs.0.append(&log_message);
+                }
+            }
+        });
+    }
 
     let mut weylus = crate::weylus::Weylus::new();
     let mut is_server_running = false;
     let auto_start = config.auto_start;
+    let current_url = Arc::new(Mutex::new(String::new()));
     let config = Arc::new(Mutex::new(config.clone()));
 
     {
         let config = config.clone();
+        let mut wind = wind.clone();
+        let mut reset_top = reset_top_widgets.clone();
         choice_theme.set_callback(move |c| {
             let v = c.value();
             if v >= 0 {
                 ThemeType::from_index(v).apply();
                 config.lock().unwrap().gui_theme = Some(ThemeType::from_index(v));
                 write_config(&config.lock().unwrap());
+                reset_top();
+                wind.redraw();
             }
         });
     }
 
-    let mut toggle_server = move |but: &mut Button| {
-        if let Err(err) = || -> Result<(), Box<dyn std::error::Error>> {
-            let mut config = config.lock().unwrap();
-            if !is_server_running {
+    {
+        let is_log_enabled = is_log_enabled.clone();
+        let log_bufs = log_bufs.clone();
+        let mut output = output.clone();
+        let mut wind = wind.clone();
+        let config = config.clone();
+        let mut reset_top = reset_top_widgets.clone();
+
+        check_enable_log.set_callback(move |btn| {
+            let enabled = btn.is_checked();
+            is_log_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut cfg = config.lock().unwrap();
+                cfg.enable_log = enabled;
+                write_config(&cfg);
+            }
+            if enabled {
+                wind.set_size(660, 536);
+                wind.size_range(660, 536, 660, 0);
+                output.resize(20, 304, 620, 220);
+                output.show();
+                reset_top();
+                wind.resizable(&output);
+                wind.init_sizes();
+                wind.redraw();
+            } else {
                 {
+                    let mut bufs = log_bufs.lock().unwrap();
+                    bufs.0.set_text("");
+                    bufs.1.set_text("");
+                }
+                output.hide();
+                wind.set_size(660, 304);
+                wind.size_range(660, 304, 660, 304);
+                reset_top();
+                wind.init_sizes();
+                wind.redraw();
+            }
+        });
+    }
+
+    {
+        let current_url = current_url.clone();
+        let mut but_copy_url_clone = but_copy_url.clone();
+        but_copy_url.set_callback(move |_| {
+            let url = current_url.lock().unwrap().clone();
+            if !url.is_empty() {
+                fltk::app::copy(&url);
+                but_copy_url_clone.set_label("Copied!");
+                let mut btn = but_copy_url_clone.clone();
+                fltk::app::add_timeout3(1.5, move |_| {
+                    btn.set_label("Copy");
+                });
+            }
+        });
+    }
+
+    let mut toggle_server = {
+        let current_url = current_url.clone();
+        let mut status_frame = status_frame.clone();
+        let mut output_server_addr = output_server_addr.clone();
+        let mut qr_frame = qr_frame.clone();
+
+        move |but: &mut Button| {
+            if let Err(err) = || -> Result<(), Box<dyn std::error::Error>> {
+                let mut config = config.lock().unwrap();
+                if !is_server_running {
                     let access_code_string = input_access_code.value();
                     let access_code = match access_code_string.as_str() {
                         "" => None,
@@ -224,94 +438,57 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                     config.web_port = web_port;
                     config.bind_address = bind_addr;
                     config.auto_start = check_auto_start.is_checked();
+                    config.enable_log = check_enable_log.is_checked();
                     config.gui_theme = Some(ThemeType::from_index(choice_theme.value()));
-                    #[cfg(target_os = "linux")]
-                    {
-                        config.try_vaapi = check_native_hw_accel.is_checked();
-                        config.wayland_support = check_wayland.is_checked();
-                    }
-                    #[cfg(any(target_os = "linux", target_os = "windows"))]
-                    {
-                        config.try_nvenc = check_nvenc.is_checked();
-                    }
-                    #[cfg(target_os = "macos")]
-                    {
-                        config.try_videotoolbox = check_native_hw_accel.is_checked();
-                    }
-                    #[cfg(target_os = "windows")]
-                    {
-                        config.try_mediafoundation = check_native_hw_accel.is_checked();
-                    }
-                }
-                if !weylus.start(&config, |message| match message {
-                    UInputInaccessible => awake_callback(move || {
-                        let w = 500;
-                        let h = 300;
-                        let mut pop_up = Window::default()
-                            .with_size(w, h)
-                            .center_screen()
-                            .with_label("Weylus - UInput inaccessible!");
-                        pop_up.set_xclass("weylus");
 
-                        let buf = TextBuffer::default();
-                        let mut pop_up_text = TextDisplay::default().with_size(w, h);
-                        pop_up_text.set_buffer(buf);
-                        pop_up_text.wrap_mode(fltk::text::WrapMode::AtBounds, 5);
-                        let mut buf = pop_up_text.buffer().unwrap();
-                        buf.set_text(std::include_str!("strings/uinput_error.txt"));
+                    let status_frame_clone = status_frame.clone();
 
-                        pop_up.end();
-                        pop_up.make_modal(true);
-                        pop_up.show();
-                    }),
-                }) {
-                    return Ok(());
-                }
-                is_server_running = true;
+                    if !weylus.start(&config, move |message| match message {
+                        Web2UiMessage::UInputInaccessible => awake_callback(move || {
+                            let w = 500;
+                            let h = 300;
+                            let mut pop_up = Window::default()
+                                .with_size(w, h)
+                                .center_screen()
+                                .with_label("Weylus - UInput inaccessible!");
+                            pop_up.set_xclass("weylus");
 
-                write_config(&config);
+                            let buf = TextBuffer::default();
+                            let mut pop_up_text = TextDisplay::default().with_size(w, h);
+                            pop_up_text.set_buffer(buf);
+                            pop_up_text.wrap_mode(fltk::text::WrapMode::AtBounds, 5);
+                            let mut buf = pop_up_text.buffer().unwrap();
+                            buf.set_text(std::include_str!("strings/uinput_error.txt"));
 
-                let mut web_sock = SocketAddr::new(config.bind_address, config.web_port);
-
-                #[cfg(not(target_os = "windows"))]
-                {
-                    if web_sock.ip().is_unspecified() {
-                        // try to guess an ip
-                        let mut ips = Vec::<IpAddr>::new();
-                        for iface in datalink::interfaces()
-                            .iter()
-                            .filter(|iface| iface.is_up() && !iface.is_loopback())
-                        {
-                            for ipnetw in &iface.ips {
-                                if (ipnetw.is_ipv4() && web_sock.ip().is_ipv4())
-                                    || (ipnetw.is_ipv6() && web_sock.ip().is_ipv6())
-                                {
-                                    // filtering ipv6 unicast requires nightly or more fiddling,
-                                    // lets wait for nightlies to stabilize...
-                                    ips.push(ipnetw.ip())
-                                }
-                            }
+                            pop_up.end();
+                            pop_up.make_modal(true);
+                            pop_up.show();
+                        }),
+                        Web2UiMessage::ClientConnected(client_info) => {
+                            let mut sf = status_frame_clone.clone();
+                            awake_callback(move || {
+                                sf.set_label(&format!("● Connected: {}", client_info));
+                                sf.set_label_color(Color::from_rgb(34, 197, 94));
+                                sf.redraw();
+                            });
                         }
-                        if !ips.is_empty() {
-                            web_sock.set_ip(ips[0]);
+                        Web2UiMessage::ClientDisconnected => {
+                            let mut sf = status_frame_clone.clone();
+                            awake_callback(move || {
+                                sf.set_label("● Running: Ready for Tablet");
+                                sf.set_label_color(Color::from_rgb(59, 130, 246));
+                                sf.redraw();
+                            });
                         }
-                        if ips.len() > 1 {
-                            info!("Found more than one IP address for browsers to connect to,");
-                            info!("other urls are:");
-                            for ip in &ips[1..] {
-                                info!("http://{}", SocketAddr::new(*ip, config.web_port));
-                            }
-                        }
+                    }) {
+                        return Ok(());
                     }
-                }
+                    is_server_running = true;
 
-                #[cfg(not(target_os = "windows"))]
-                {
-                    use image::Luma;
-                    use qrcode::QrCode;
-                    let addr_string = format!("http://{}", web_sock);
-                    output_server_addr.set_value(&addr_string);
-                    let mut url_string = addr_string;
+                    write_config(&config);
+
+                    let lan_ip = get_lan_ip(config.bind_address);
+                    let mut url_string = format!("http://{}:{}", lan_ip, config.web_port);
                     if let Some(access_code) = &config.access_code {
                         url_string.push_str("?access_code=");
                         url_string.push_str(
@@ -323,52 +500,33 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                         );
                     }
 
-                    let cb = move |qr_frame: &mut Frame, _, _, w, h| {
-                        let code = QrCode::new(&url_string).unwrap();
-                        let img_buf = code.render::<Luma<u8>>().build();
-                        let image = image::DynamicImage::ImageLuma8(img_buf);
-                        let dims = min(w, h) as u32;
-                        let image =
-                            image.resize_exact(dims, dims, image::imageops::FilterType::Nearest);
-                        let mut buf = vec![];
-                        let mut cursor = Cursor::new(&mut buf);
-                        image
-                            .write_to(&mut cursor, image::ImageFormat::Png)
-                            .unwrap();
-                        let png = PngImage::from_data(&buf).unwrap();
-                        qr_frame.set_image(Some(png));
-                    };
+                    *current_url.lock().unwrap() = url_string.clone();
+                    output_server_addr.set_value(&url_string);
+                    render_qr_to_frame(&mut qr_frame, &url_string, 210);
 
-                    let x = qr_frame.x();
-                    let y = qr_frame.y();
-                    let w = qr_frame.width();
-                    let h = qr_frame.height();
-                    cb(&mut qr_frame, x, y, w, h);
-                    qr_frame.resize_callback(cb);
-                    qr_frame.show();
+                    status_frame.set_label("● Running: Ready for Tablet");
+                    status_frame.set_label_color(Color::from_rgb(59, 130, 246));
+                    status_frame.redraw();
+
+                    but.set_label("Stop");
+                    info!("Weylus Graphics Tablet server started on {}", url_string);
+                } else {
+                    weylus.stop();
+                    but.set_label("Start");
+                    qr_frame.set_image(None::<PngImage>);
+                    qr_frame.redraw();
+                    output_server_addr.set_value("");
+                    status_frame.set_label("● Server Stopped");
+                    status_frame.set_label_color(Color::from_rgb(160, 160, 160));
+                    status_frame.redraw();
+                    *current_url.lock().unwrap() = String::new();
+                    is_server_running = false;
                 }
-                #[cfg(target_os = "windows")]
-                {
-                    if web_sock.ip().is_unspecified() {
-                        output_server_addr.set_value("http://<your ip address>");
-                    } else {
-                        output_server_addr.set_value(&format!("http://{}", web_sock.to_string()));
-                    }
-                }
-                output_server_addr.show();
-                but.set_label("Stop");
-            } else {
-                weylus.stop();
-                but.set_label("Start");
-                output_server_addr.hide();
-                qr_frame.resize_callback(|_, _, _, _, _| {});
-                qr_frame.hide();
-                is_server_running = false;
-            }
-            Ok(())
-        }() {
-            error!("{}", err);
-        };
+                Ok(())
+            }() {
+                error!("{}", err);
+            };
+        }
     };
 
     if auto_start {
@@ -378,9 +536,6 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     but_toggle.set_callback(toggle_server);
 
     app.run().expect("Failed to run Gui!");
-
-    // TODO: Remove when https://github.com/fltk-rs/fltk-rs/issues/1480 is fixed
-    // this is required to drop the callback and do a graceful shutdown of the web server
     but_toggle.set_callback(|_| ());
 }
 
@@ -399,8 +554,6 @@ pub fn get_input_area(
     no_gui: bool,
     output_sender: std::sync::mpsc::Sender<crate::protocol::CustomInputAreas>,
 ) {
-    // If no gui is running there is no event loop and windows can not be created.
-    // That's why we initialize the fltk app here one the first call.
     if no_gui {
         static GUI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -412,9 +565,7 @@ pub fn get_input_area(
                 show_overlay_window(&mut winctx);
                 WINCTX.lock().unwrap().replace(winctx);
                 loop {
-                    // calling wait_for ensures that the fltk event loop keeps running even if
-                    // there is no window shown
-                    if let Err(err) = app::wait_for(1.0) {
+                    if let Err(err) = fltk::app::wait_for(1.0) {
                         warn!("Error waiting for fltk events: {err}.");
                     }
                 }
@@ -446,45 +597,40 @@ fn create_custom_input_area_window() -> InputAreaWindowContext {
     win.make_resizable(true);
     win.set_border(false);
     win.set_frame(FrameType::FlatBox);
-    win.set_color(fltk::enums::Color::from_rgb(240, 240, 240));
+    win.set_color(Color::from_rgb(240, 240, 240));
     let mut frame = Frame::default()
         .with_size(win.w() - 2 * BORDER, win.h() - 2 * BORDER)
         .center_of_parent()
-        .with_label(
-            "Press Enter to submit\ncurrent selection as\ncustom input area,\nEscape to abort.",
-        );
+        .with_label("Press Enter to submit,\nEscape to abort.");
     frame.set_label_type(LabelType::Normal);
     frame.set_label_size(20);
-    frame.set_color(fltk::enums::Color::Black);
+    frame.set_color(Color::Black);
     frame.set_frame(FrameType::BorderFrame);
     frame.set_label_font(fltk::enums::Font::HelveticaBold);
+
     let width = 200;
     let height = 30;
     let padding = 10;
-    let tool_tip = "Some systems may have the input device mapped to a specific screen, this screen has to be selected here. Otherwise input mapping will be wrong. Selecting None disables any mapping.";
-    let mut choice_mouse = Choice::default()
+    let choice_mouse = Choice::default()
         .with_size(width, height)
         .with_pos(padding, 4 * padding)
         .center_x(&frame)
         .with_id("choice_mouse")
         .with_label("Map Mouse from:");
-    choice_mouse.set_tooltip(tool_tip);
-    let mut choice_touch = Choice::default()
+    let choice_touch = Choice::default()
         .with_size(width, height)
         .below_of(&choice_mouse, padding)
         .with_id("choice_touch")
         .with_label("Map Touch from:");
-    choice_touch.set_tooltip(tool_tip);
-    let mut choice_pen = Choice::default()
+    let choice_pen = Choice::default()
         .with_size(width, height)
         .below_of(&choice_touch, padding)
         .with_id("choice_pen")
         .with_label("Map Pen from:");
-    choice_pen.set_tooltip(tool_tip);
 
     frame.handle(|frame, event| match event {
         fltk::enums::Event::Push => {
-            if app::event_clicks() {
+            if fltk::app::event_clicks() {
                 if let Some(mut win) = frame.window() {
                     win.fullscreen(!win.fullscreen_active());
                 }
@@ -577,7 +723,7 @@ fn custom_input_area_window_handle_events(
     win.handle(move |win, event| {
         match event {
             fltk::enums::Event::Move => {
-                let (x, y) = get_screen_coords_from_event_coords(&win, app::event_coords());
+                let (x, y) = get_screen_coords_from_event_coords(&win, fltk::app::event_coords());
                 let flags = get_mouse_flags(&win, x, y);
                 set_cursor(win, &mut current_cursor, Some(flags));
                 true
@@ -587,7 +733,7 @@ fn custom_input_area_window_handle_events(
                 true
             }
             fltk::enums::Event::Push => {
-                (x, y) = get_screen_coords_from_event_coords(&win, app::event_coords());
+                (x, y) = get_screen_coords_from_event_coords(&win, fltk::app::event_coords());
                 win_x_drag_start = win.x();
                 win_y_drag_start = win.y();
                 win_w_drag_start = win.w();
@@ -599,7 +745,7 @@ fn custom_input_area_window_handle_events(
                 if win.opacity() == 1.0 {
                     win.set_opacity(0.5);
                 }
-                let (x_new, y_new) = get_screen_coords_from_event_coords(&win, app::event_coords());
+                let (x_new, y_new) = get_screen_coords_from_event_coords(&win, fltk::app::event_coords());
                 let dx = x_new - x;
                 let dy = y_new - y;
                 match drag_flags {
@@ -666,10 +812,9 @@ fn custom_input_area_window_handle_events(
                 }
                 true
             }
-            fltk::enums::Event::KeyDown => match app::event_key() {
+            fltk::enums::Event::KeyDown => match fltk::app::event_key() {
                 fltk::enums::Key::Enter => {
                     fn relative_rect(win: &Window, workspace: &Rect) -> Rect {
-                        // clamp rect to workspace and ensure it has non-zero area
                         let mut rect = crate::protocol::Rect {
                             x: (win.x() as f64 - workspace.x).min(workspace.w) / workspace.w,
                             y: (win.y() as f64 - workspace.y).min(workspace.h) / workspace.h,
@@ -699,7 +844,7 @@ fn custom_input_area_window_handle_events(
                             v => warn!("Unexpected value in {name}: {v}!"),
                         }
                     }
-                    sender.send(areas).unwrap();
+                    let _ = sender.send(areas);
                     true
                 }
                 fltk::enums::Key::Escape => {
@@ -759,7 +904,7 @@ fn show_overlay_window(winctx: &mut InputAreaWindowContext) {
     if win.fullscreen_active() {
         win.set_size(600, 600);
         let n = win.screen_num();
-        let screen = app::Screen::new(n).unwrap();
+        let screen = fltk::app::Screen::new(n).unwrap();
         win.set_pos(
             screen.x() + (screen.w() - 600) / 2,
             screen.y() + (screen.h() - 600) / 2,

@@ -15,4 +15,11 @@ pub trait InputDevice {
     fn send_keyboard_event(&mut self, event: &KeyboardEvent);
     fn set_capturable(&mut self, capturable: Box<dyn Capturable>);
     fn device_type(&self) -> InputDeviceType;
+    fn update_tablet_config(
+        &mut self,
+        _stylus_only: bool,
+        _orientation: u16,
+        _pressure_sensitivity: f64,
+    ) {
+    }
 }

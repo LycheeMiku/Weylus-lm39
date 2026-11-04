@@ -68,6 +68,10 @@ impl ThemeType {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Serialize, Deserialize, Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 pub struct Config {
@@ -82,6 +86,7 @@ pub struct Config {
         long,
         help = "Try to use hardware acceleration through the Video Acceleration API."
     )]
+    #[serde(default)]
     pub try_vaapi: bool,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[arg(long, help = "Try to use Nvidia's NVENC to encode the video via GPU.")]
@@ -101,9 +106,12 @@ pub struct Config {
     )]
     #[serde(default)]
     pub try_mediafoundation: bool,
-    #[arg(long, help = "Start Weylus server immediately on program start.")]
-    #[serde(default)]
+    #[arg(long, default_value = "true", help = "Start Weylus server immediately on program start.")]
+    #[serde(default = "default_true")]
     pub auto_start: bool,
+    #[arg(long, default_value = "true", help = "Enable log window in GUI.")]
+    #[serde(default = "default_true")]
+    pub enable_log: bool,
     #[arg(long, help = "Gui Theme")]
     pub gui_theme: Option<ThemeType>,
     #[arg(long, help = "Run Weylus without gui and start immediately.")]

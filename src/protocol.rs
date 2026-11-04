@@ -1,15 +1,40 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+fn default_tablet_mode() -> bool {
+    true
+}
+
+fn default_pressure_sensitivity() -> f64 {
+    1.0
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClientConfiguration {
     #[cfg(target_os = "linux")]
     pub uinput_support: bool,
     pub capturable_id: usize,
+    #[serde(default)]
     pub capture_cursor: bool,
+    #[serde(default)]
     pub max_width: usize,
+    #[serde(default)]
     pub max_height: usize,
     pub client_name: Option<String>,
+    #[serde(default)]
     pub frame_rate: f64,
+    // Tablet Mode configurations
+    #[serde(default = "default_tablet_mode")]
+    pub tablet_mode: bool,
+    #[serde(default)]
+    pub stylus_only: bool,
+    #[serde(default)]
+    pub lock_aspect_ratio: bool,
+    #[serde(default)]
+    pub orientation: u16,
+    #[serde(default)]
+    pub pressure_curve: String,
+    #[serde(default = "default_pressure_sensitivity")]
+    pub pressure_sensitivity: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -61,7 +86,7 @@ pub struct CustomInputAreas {
     pub pen: Option<Rect>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PointerType {
     #[serde(rename = "")]
     Unknown,
@@ -73,7 +98,7 @@ pub enum PointerType {
     Touch,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PointerEventType {
     #[serde(rename = "pointerdown")]
     DOWN,
@@ -93,7 +118,7 @@ pub enum PointerEventType {
     OUT,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum KeyboardEventType {
     #[serde(rename = "down")]
     DOWN,
@@ -103,7 +128,7 @@ pub enum KeyboardEventType {
     REPEAT,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum KeyboardLocation {
     STANDARD,
     LEFT,
@@ -171,8 +196,6 @@ pub struct PointerEvent {
     pub buttons: Button,
     pub x: f64,
     pub y: f64,
-    // pub movement_x: f64,
-    // pub movement_y: f64,
     pub pressure: f64,
     pub tilt_x: i32,
     pub tilt_y: i32,

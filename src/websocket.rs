@@ -2,23 +2,19 @@ use fastwebsockets::{FragmentCollectorRead, Frame, OpCode, WebSocket, WebSocketE
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
-use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{mpsc, Arc};
 use std::thread::{spawn, JoinHandle};
-use std::time::{Duration, Instant};
 use tokio::sync::mpsc::channel;
 use tracing::{error, trace, warn};
 
-use crate::capturable::{get_capturables, Capturable, Recorder};
-use crate::input::device::{InputDevice, InputDeviceType};
+use crate::capturable::{get_capturables, Capturable};
+use crate::input::device::InputDevice;
 use crate::protocol::{
     ClientConfiguration, KeyboardEvent, MessageInbound, MessageOutbound, PointerEvent,
     WeylusReceiver, WeylusSender, WheelEvent,
 };
 
-use crate::cerror::CErrorCode;
-use crate::video::{EncoderOptions, VideoEncoder};
-
+#[allow(dead_code)]
 struct VideoConfig {
     capturable: Box<dyn Capturable>,
     capture_cursor: bool,
@@ -59,7 +55,7 @@ pub struct WeylusClientHandler<S, R, FnUInput> {
 
 #[derive(Clone, Copy)]
 pub struct WeylusClientConfig {
-    pub encoder_options: EncoderOptions,
+    pub encoder_options: crate::video::EncoderOptions,
     #[cfg(target_os = "linux")]
     pub wayland_support: bool,
     pub no_gui: bool,
@@ -79,8 +75,6 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
         let (video_sender, video_receiver) = mpsc::channel::<VideoCommands>();
         let video_thread = {
             let sender = sender.clone();
-            // offload creating the videostream to another thread to avoid blocking the thread that
-            // is receiving messages from the websocket
             spawn(move || handle_video(video_receiver, sender, config.encoder_options))
         };
 
@@ -116,13 +110,13 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                         MessageInbound::GetCapturableList => self.send_capturable_list(),
                         MessageInbound::Config(config) => self.update_config(config),
                         MessageInbound::PauseVideo => {
-                            self.video_sender.send(VideoCommands::Pause).unwrap()
+                            let _ = self.video_sender.send(VideoCommands::Pause);
                         }
                         MessageInbound::ResumeVideo => {
-                            self.video_sender.send(VideoCommands::Resume).unwrap()
+                            let _ = self.video_sender.send(VideoCommands::Resume);
                         }
                         MessageInbound::RestartVideo => {
-                            self.video_sender.send(VideoCommands::Restart).unwrap()
+                            let _ = self.video_sender.send(VideoCommands::Restart);
                         }
                         MessageInbound::ChooseCustomInputAreas => {
                             let (sender, receiver) = std::sync::mpsc::channel();
@@ -147,7 +141,6 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                 }
             }
         }
-
         drop(self.video_sender);
         if let Err(err) = self.video_thread.join() {
             warn!("Failed to join video thread: {err:?}");
@@ -164,29 +157,48 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
     fn process_wheel_event(&mut self, event: &WheelEvent) {
         match &mut self.input_device {
             Some(i) => i.send_wheel_event(event),
-            None => warn!("Input device is not initalized, can not process WheelEvent!"),
+            None => warn!("Input device is not initialized, cannot process WheelEvent!"),
         }
     }
 
     fn process_pointer_event(&mut self, event: &PointerEvent) {
-        if self.input_device.is_some() {
-            self.input_device
-                .as_mut()
-                .unwrap()
-                .send_pointer_event(event)
+        if let Some(i) = self.input_device.as_mut() {
+            i.send_pointer_event(event);
         } else {
-            warn!("Input device is not initalized, can not process PointerEvent!");
+            // Lazy init input device with default capturable if not already initialized
+            if self.capturables.is_empty() {
+                self.capturables = get_capturables(
+                    #[cfg(target_os = "linux")]
+                    self.config.wayland_support,
+                    #[cfg(target_os = "linux")]
+                    self.capture_cursor,
+                );
+            }
+            if !self.capturables.is_empty() {
+                let capturable = self.capturables[0].clone();
+                #[cfg(target_os = "windows")]
+                {
+                    let mut dev = crate::input::autopilot_device_win::WindowsInput::new(capturable);
+                    dev.send_pointer_event(event);
+                    self.input_device = Some(Box::new(dev));
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let mut dev = crate::input::autopilot_device::AutoPilotDevice::new(capturable);
+                    dev.send_pointer_event(event);
+                    self.input_device = Some(Box::new(dev));
+                }
+            } else {
+                warn!("No display capturable found, cannot process PointerEvent!");
+            }
         }
     }
 
     fn process_keyboard_event(&mut self, event: &KeyboardEvent) {
-        if self.input_device.is_some() {
-            self.input_device
-                .as_mut()
-                .unwrap()
-                .send_keyboard_event(event)
+        if let Some(i) = self.input_device.as_mut() {
+            i.send_keyboard_event(event);
         } else {
-            warn!("Input device is not initalized, can not process KeyboardEvent!");
+            warn!("Input device is not initialized, cannot process KeyboardEvent!");
         }
     }
 
@@ -212,14 +224,30 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
         S: WeylusSender,
         FnUInput: Fn(),
     {
-        let client_name_changed = if self.client_name != config.client_name {
-            self.client_name = config.client_name;
+        let _client_name_changed = if self.client_name != config.client_name {
+            self.client_name = config.client_name.clone();
             true
         } else {
             false
         };
-        if config.capturable_id < self.capturables.len() {
-            let capturable = self.capturables[config.capturable_id].clone();
+
+        if self.capturables.is_empty() {
+            self.capturables = get_capturables(
+                #[cfg(target_os = "linux")]
+                self.config.wayland_support,
+                #[cfg(target_os = "linux")]
+                self.capture_cursor,
+            );
+        }
+
+        let capturable_id = if config.capturable_id < self.capturables.len() {
+            config.capturable_id
+        } else {
+            0
+        };
+
+        if capturable_id < self.capturables.len() {
+            let capturable = self.capturables[capturable_id].clone();
 
             #[cfg(target_os = "linux")]
             {
@@ -239,7 +267,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                         Ok(d) => self.input_device = Some(Box::new(d)),
                         Err(e) => {
                             error!("Failed to create uinput device: {}", e);
-                            if let CErrorCode::UInputNotAccessible = e.to_enum() {
+                            if let crate::cerror::CErrorCode::UInputNotAccessible = e.to_enum() {
                                 (self.on_uinput_inaccessible)();
                             }
                             self.send_message(MessageOutbound::ConfigError(
@@ -250,6 +278,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                     }
                 } else if let Some(d) = self.input_device.as_mut() {
                     d.set_capturable(capturable.clone());
+                    d.update_tablet_config(config.stylus_only, config.orientation, config.pressure_sensitivity);
                 }
             } else if self.input_device.as_ref().map_or(true, |d| {
                 d.device_type() != InputDeviceType::AutoPilotDevice
@@ -259,6 +288,7 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                 ));
             } else if let Some(d) = self.input_device.as_mut() {
                 d.set_capturable(capturable.clone());
+                d.update_tablet_config(config.stylus_only, config.orientation, config.pressure_sensitivity);
             }
 
             #[cfg(target_os = "macos")]
@@ -271,26 +301,31 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                     .as_mut()
                     .map(|d| d.set_capturable(capturable.clone()));
             }
+
             #[cfg(target_os = "windows")]
             if self.input_device.is_none() {
-                self.input_device = Some(Box::new(
-                    crate::input::autopilot_device_win::WindowsInput::new(capturable.clone()),
-                ));
-            } else {
-                self.input_device
-                    .as_mut()
-                    .map(|d| d.set_capturable(capturable.clone()));
+                let mut dev = crate::input::autopilot_device_win::WindowsInput::new(capturable.clone());
+                dev.update_tablet_config(config.stylus_only, config.orientation, config.pressure_sensitivity);
+                self.input_device = Some(Box::new(dev));
+            } else if let Some(d) = self.input_device.as_mut() {
+                d.set_capturable(capturable.clone());
+                d.update_tablet_config(config.stylus_only, config.orientation, config.pressure_sensitivity);
             }
 
-            self.video_sender
-                .send(VideoCommands::Start(VideoConfig {
-                    capturable,
-                    capture_cursor: config.capture_cursor,
-                    max_width: config.max_width,
-                    max_height: config.max_height,
-                    frame_rate: config.frame_rate,
-                }))
-                .unwrap();
+            if config.tablet_mode {
+                // Pure graphics tablet mode: no screen capture loop, no video stream encoding
+                self.send_message(MessageOutbound::ConfigOk);
+            } else {
+                self.video_sender
+                    .send(VideoCommands::Start(VideoConfig {
+                        capturable,
+                        capture_cursor: config.capture_cursor,
+                        max_width: config.max_width,
+                        max_height: config.max_height,
+                        frame_rate: config.frame_rate,
+                    }))
+                    .unwrap();
+            }
         } else {
             error!("Got invalid id for capturable: {}", config.capturable_id);
             self.send_message(MessageOutbound::ConfigError(
@@ -303,140 +338,16 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
 fn handle_video<S: WeylusSender + Clone + 'static>(
     receiver: mpsc::Receiver<VideoCommands>,
     mut sender: S,
-    encoder_options: EncoderOptions,
+    _encoder_options: crate::video::EncoderOptions,
 ) {
-    const EFFECTIVE_INIFINITY: Duration = Duration::from_secs(3600 * 24 * 365 * 200);
-
-    let mut recorder: Option<Box<dyn Recorder>> = None;
-    let mut video_encoder: Option<Box<VideoEncoder>> = None;
-
-    let mut max_width = 1920;
-    let mut max_height = 1080;
-    let mut frame_duration = EFFECTIVE_INIFINITY;
-    let mut last_frame = Instant::now();
-    let mut paused = false;
-
-    loop {
-        let now = Instant::now();
-        let elapsed = now - last_frame;
-        let frames_passed = (elapsed.as_secs_f64() / frame_duration.as_secs_f64()) as u32;
-        let next_frame = last_frame + (frames_passed + 1) * frame_duration;
-        let timeout = next_frame - now;
-        last_frame = next_frame;
-
-        if frames_passed > 0 {
-            trace!("Dropped {frames_passed} frame(s)!");
+    // In tablet mode, video capturing and encoding is stripped to save CPU/GPU and network bandwidth.
+    while let Ok(cmd) = receiver.recv() {
+        match cmd {
+            VideoCommands::Start(_) => {
+                send_message(&mut sender, MessageOutbound::ConfigOk);
+            }
+            _ => {}
         }
-
-        match receiver.recv_timeout(if paused { EFFECTIVE_INIFINITY } else { timeout }) {
-            Ok(VideoCommands::Start(config)) => {
-                #[allow(unused_assignments)]
-                {
-                    // gstpipewire can not handle setting a pipeline's state to Null after another
-                    // pipeline has been created and its state has been set to Play.
-                    // This line makes sure that there always is only a single recorder and thus
-                    // single pipeline in this thread by forcing rust to call the destructor of the
-                    // current pipeline here, right before creating a new pipeline.
-                    // See: https://gitlab.freedesktop.org/pipewire/pipewire/-/issues/986
-                    //
-                    // This shouldn't affect other Recorder trait objects.
-                    recorder = None;
-                }
-                match config.capturable.recorder(config.capture_cursor) {
-                    Ok(r) => {
-                        recorder = Some(r);
-                        max_width = config.max_width;
-                        max_height = config.max_height;
-                        send_message(&mut sender, MessageOutbound::ConfigOk);
-                    }
-                    Err(err) => {
-                        warn!("Failed to init screen cast: {}!", err);
-                        send_message(
-                            &mut sender,
-                            MessageOutbound::Error("Failed to init screen cast!".into()),
-                        )
-                    }
-                }
-                last_frame = Instant::now();
-
-                // The Duration type can not handle infinity, if the frame rate is set to 0 we just
-                // set the duration between two frames to a very long one, which is effectively
-                // infinity.
-                let d = 1.0 / config.frame_rate;
-                frame_duration = if d.is_finite() {
-                    Duration::from_secs_f64(d)
-                } else {
-                    EFFECTIVE_INIFINITY
-                };
-                frame_duration = frame_duration.min(EFFECTIVE_INIFINITY);
-            }
-            Ok(VideoCommands::Pause) => {
-                paused = true;
-            }
-            Ok(VideoCommands::Resume) => {
-                paused = false;
-            }
-            Ok(VideoCommands::Restart) => {
-                video_encoder = None;
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                if recorder.is_none() {
-                    warn!("Screen capture not initalized, can not send video frame!");
-                    continue;
-                }
-                let pixel_data = recorder.as_mut().unwrap().capture();
-                if let Err(err) = pixel_data {
-                    warn!("Error capturing screen: {}", err);
-                    continue;
-                }
-                let pixel_data = pixel_data.unwrap();
-                let (width_in, height_in) = pixel_data.size();
-                let scale =
-                    (max_width as f64 / width_in as f64).min(max_height as f64 / height_in as f64);
-                // limit video to 4K
-                let scale_max = (3840.0 / width_in as f64).min(2160.0 / height_in as f64);
-                let scale = scale.min(scale_max);
-                let mut width_out = width_in;
-                let mut height_out = height_in;
-                if scale < 1.0 {
-                    width_out = (width_out as f64 * scale) as usize;
-                    height_out = (height_out as f64 * scale) as usize;
-                }
-                // video encoder is not setup or setup for encoding the wrong size: restart it
-                if video_encoder.is_none()
-                    || !video_encoder
-                        .as_ref()
-                        .unwrap()
-                        .check_size(width_in, height_in, width_out, height_out)
-                {
-                    send_message(&mut sender, MessageOutbound::NewVideo);
-                    let mut sender = sender.clone();
-                    let res = VideoEncoder::new(
-                        width_in,
-                        height_in,
-                        width_out,
-                        height_out,
-                        move |data| {
-                            if let Err(err) = sender.send_video(data) {
-                                warn!("Failed to send video frame: {err}!");
-                            }
-                        },
-                        encoder_options,
-                    );
-                    match res {
-                        Ok(r) => video_encoder = Some(r),
-                        Err(e) => {
-                            warn!("{}", e);
-                            continue;
-                        }
-                    };
-                }
-                let video_encoder = video_encoder.as_mut().unwrap();
-                video_encoder.encode(pixel_data);
-            }
-            // stop thread once the channel is closed
-            Err(RecvTimeoutError::Disconnected) => return,
-        };
     }
 }
 

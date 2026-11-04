@@ -6,7 +6,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="mobile-web-app-capable" content="yes">
-    <title>Weylus</title>
+    <title>Weylus - Graphics Tablet</title>
     <link rel="stylesheet" href="style.css">
     <script src="lib.js"></script>
     <script>
@@ -16,67 +16,81 @@
 
 <body>
     <main id="main">
-        <video id="video" autoplay muted defaultMuted playsinline disablePictureInPicture></video>
-        <canvas id="canvas" class="vanish"></canvas>
+        <canvas id="tablet_canvas"></canvas>
+        <div id="hud_overlay">
+            <div class="hud-item" id="hud_monitor">DISP 1</div>
+            <div class="hud-item" id="hud_type">PEN</div>
+            <div class="hud-item" id="hud_state">IDLE</div>
+            <div class="hud-item" id="hud_pressure_wrap">
+                <span id="hud_pressure_val">0%</span>
+                <div class="pressure-bar-bg">
+                    <div id="hud_pressure_bar"></div>
+                </div>
+            </div>
+            <div class="hud-item" id="hud_coord">X: 0 | Y: 0</div>
+        </div>
+        <button id="btn_toggle_sidebar" class="sidebar-toggle-btn" title="Toggle Sidebar">⚙</button>
         <div id="debug_overlay" class="hide"></div>
     </main>
-    <div id="settings">
-        <div id="handle">⠿</div>
+    <aside id="settings">
+        <div class="settings-header">
+            <h2>Tablet Settings</h2>
+            <button id="btn_close_sidebar" class="sidebar-close-btn" title="Close Sidebar">✕</button>
+        </div>
         <div id="settings_scroll">
-            <h2>Settings</h2>
             <section>
-                <label for="window">Capture:</label>
+                <label for="window">Target Monitor:</label>
                 <select id="window"></select>
-                <button id="refresh">Refresh List</button>
+                <div style="display: flex; gap: 8px; margin-top: 6px;">
+                    <button id="btn_cycle_monitor" style="flex: 1; margin: 0;">Switch Monitor ⤾</button>
+                    <button id="refresh" style="flex: 1; margin: 0;">Refresh</button>
+                </div>
             </section>
-            <h3>Video</h3>
+            <h3>Input & Tablet</h3>
             <section>
-                <label><input type="checkbox" id="enable_video" checked /> <span>Enable Video</span></label>
-                <label><input type="checkbox" id="energysaving" /> <span>Energy Saving (no video, black
-                        screen)</span></label>
-                <label><input type="checkbox" id="stretch" checked /> <span>Stretch Video</span></label>
+                <label><input type="checkbox" id="stylus_only" checked /> <span>Stylus Only (Palm Rejection)</span></label>
+                <label><input type="checkbox" id="lock_aspect_ratio" checked /> <span>Lock Aspect Ratio</span></label>
+                <label for="orientation">Orientation:
+                    <select id="orientation">
+                        <option value="0">0° (Standard)</option>
+                        <option value="90">90° (Right)</option>
+                        <option value="180">180° (Inverted)</option>
+                        <option value="270">270° (Left / Lefty)</option>
+                    </select>
+                </label>
+                <label for="canvas_bg">Background:
+                    <select id="canvas_bg">
+                        <option value="dots">Dot Matrix</option>
+                        <option value="grid">Fine Grid</option>
+                        <option value="blank">Plain Solid</option>
+                    </select>
+                </label>
+                <label><input type="checkbox" id="enable_hud" checked /> <span>Show HUD Status</span></label>
+                <label><input type="checkbox" id="stroke_preview" checked /> <span>Pen Stroke Preview</span></label>
+            </section>
+            <h3>Pressure Curve</h3>
+            <section>
+                <label for="pressure_curve_preset">Sensitivity:
+                    <select id="pressure_curve_preset">
+                        <option value="linear">Linear</option>
+                        <option value="soft">Soft (Light Touch)</option>
+                        <option value="hard">Hard (Firm Touch)</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </label>
+                <label>Curve Gamma: <output id="gamma_out">1.0</output>
+                    <input type="range" id="pressure_sensitivity" min="0.4" max="2.5" step="0.05" value="1.0" />
+                </label>
+                <label>Min Pressure:
+                    <input type="range" id="min_pressure" min="0" max="0.3" step="0.01" value="0" />
+                </label>
+            </section>
+            <section id="system_section">
                 <button id="fullscreen">Toggle Fullscreen</button>
-                <label {{#if (not capture_cursor_enabled)}}class="hide" {{/if}}>
-                    <input type="checkbox" id="capture_cursor" />
-                    <span>Capture Cursor</span>
-                </label>
-                <label><input type="checkbox" id="aggressive_seeking" checked /> <span>Lower Latency<br>(possibly
-                        choppy)</span></label>
-                <label>Max Video Resolution: <br><input type="range" id="scale_video" min="0.1" max="2" step="0.01"
-                        value="1.8" /><output></output></label>
-                <label>Frame Rate: <br><input type="range" id="frame_rate" value="0" /><output>30</output> fps</label>
-            </section>
-            <h3>Input</h3>
-            <section>
-                <label><input type="checkbox" id="enable_mouse" checked /> <span>Enable Mouse</span></label>
-                <label><input type="checkbox" id="enable_stylus" checked /> <span>Enable Stylus</span></label>
-                <label><input type="checkbox" id="enable_touch" checked /> <span>Enable Touch</span></label>
-                <label {{#if (not uinput_enabled)}}class="hide" {{/if}}>
-                    <input type="checkbox" id="uinput_support" checked />
-                    <span>Enable uinput</span>
-                </label>
-                <label>Min pressure to generate: <br><input type="range" id="min_pressure" min="0" max="1" step="0.01"
-                        value="0" /></label>
-                <button id="custom_input_areas" {{#if (not enable_custom_input_areas)}}class="hide" {{/if}}>Custom Input
-                    Area</button>
-                <label {{#if (not enable_custom_input_areas)}}class="hide" {{/if}}><input type="checkbox"
-                        id="enable_custom_input_areas" /> <span>Enable Custom Input
-                        Area</span></label>
-            </section>
-            <section {{#if (not uinput_enabled)}}class="hide" {{/if}}>
-                <label><span>Client Name:</span><br><input type="text" id="client_name" /><br><span>Optional, useful to
-                        distinguish multiple devices.</span></label>
-            </section>
-            <section id="displayoptions">
-                <label id="leftylabel"><input type="checkbox" id="lefty" />Swap</label>
-                <label id="vanish">Hide until Reload</label>
-            </section>
-            <section id="stats_section">
-                <label><span>FPS (receiving): </span><output id="fps">0</output></label>
+                <label id="leftylabel"><input type="checkbox" id="lefty" /> <span>Swap Panel Side</span></label>
             </section>
             <section id="debug_section">
-                <label><input type="checkbox" id="enable_debug_overlay" /> <span>Debug
-                        Overlay</span></label>
+                <label><input type="checkbox" id="enable_debug_overlay" /> <span>Debug Overlay</span></label>
             </section>
             <section id="log_section" class="hide">
                 <label>Log
@@ -84,7 +98,7 @@
                 </label>
             </section>
         </div>
-    </div>
+    </aside>
 </body>
 
 </html>

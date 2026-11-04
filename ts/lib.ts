@@ -1,7 +1,3 @@
-interface Window {
-    ManagedMediaSource: any;
-}
-
 enum LogLevel {
     ERROR = 0,
     WARN,
@@ -14,1115 +10,721 @@ let log_pre: HTMLPreElement;
 let log_level: LogLevel = LogLevel.ERROR;
 let no_log_messages: boolean = true;
 
-let fps_out: HTMLOutputElement;
-let frame_count = 0;
-let last_fps_calc: number = performance.now();
-
-let check_video: HTMLInputElement;
-
 function run(level: string) {
     window.onload = () => {
         log_pre = document.getElementById("log") as HTMLPreElement;
-        log_pre.textContent = "";
-        log_level = LogLevel[level];
-        fps_out = document.getElementById("fps") as HTMLOutputElement;
-        check_video = document.getElementById("enable_video") as HTMLInputElement;
-        window.addEventListener("error", (e: ErrorEvent | Event | UIEvent) => {
-            if ((e as ErrorEvent).error) {
-                let err = e as ErrorEvent;
-                log(LogLevel.ERROR, err.filename + ":L" + err.lineno + ":" + err.colno + ": " + err.message + " Error object: " + JSON.stringify(err.error));
-            } else if ((e as Event | UIEvent).target) {
-                let ev = e as Event;
-                let src = (e.target as any).src;
-                if (ev.target instanceof HTMLVideoElement)
-                    log(LogLevel.ERROR, "Failed to decode video, try reducing resolution or disabling hardware acceleration and reload the page. Error src: " + src);
-                else
-                    log(LogLevel.ERROR, "Failed to obtain resource, target: " + ev.target + " type: " + ev.type + " src: " + src + " Error object: " + JSON.stringify(ev));
-            } else {
-                log(LogLevel.WARN, "Got unknown event: " + JSON.stringify(e));
+        if (log_pre) log_pre.textContent = "";
+        if (LogLevel[level] !== undefined) {
+            log_level = LogLevel[level];
+        }
+        window.addEventListener("error", (e: ErrorEvent) => {
+            if (e.error) {
+                log(LogLevel.ERROR, `${e.filename}:L${e.lineno}:${e.colno}: ${e.message}`);
             }
             return false;
-        }, true)
+        }, true);
         init();
     };
 }
 
 function log(level: LogLevel, msg: string) {
-    if (level > log_level)
-        return;
+    if (level > log_level) return;
+    if (level === LogLevel.TRACE) console.trace(msg);
+    else if (level === LogLevel.DEBUG) console.debug(msg);
+    else if (level === LogLevel.INFO) console.info(msg);
+    else if (level === LogLevel.WARN) console.warn(msg);
+    else if (level === LogLevel.ERROR) console.error(msg);
 
-    if (level == LogLevel.TRACE)
-        console.trace(msg);
-    else if (level == LogLevel.DEBUG)
-        console.debug(msg);
-    else if (level == LogLevel.INFO)
-        console.info(msg);
-    else if (level == LogLevel.WARN)
-        console.warn(msg);
-    else if (level == LogLevel.ERROR)
-        console.error(msg);
-
-    if (no_log_messages) {
+    if (no_log_messages && log_pre) {
         no_log_messages = false;
-        document.getElementById("log_section").classList.remove("hide");
+        let logSec = document.getElementById("log_section");
+        if (logSec) logSec.classList.remove("hide");
     }
-    log_pre.textContent += LogLevel[level] + ": " + msg + "\n";
-}
-
-function frame_rate_scale(x: number) {
-    return Math.pow(x / 100, 1.5);
-}
-
-function frame_rate_scale_inv(x: number) {
-    return 100 * Math.pow(x, 2 / 3);
-}
-
-
-function calc_max_video_resolution(scale: number) {
-    return [
-        Math.round(scale * window.innerWidth * window.devicePixelRatio),
-        Math.round(scale * window.innerHeight * window.devicePixelRatio)
-    ];
-}
-
-function fresh_canvas() {
-    let canvas_old = document.getElementById("canvas");
-    let canvas = document.createElement("canvas");
-    canvas.id = canvas_old.id;
-    canvas_old.classList.forEach((cls) => canvas.classList.add(cls));
-    canvas_old.replaceWith(canvas);
-    return canvas;
+    if (log_pre) {
+        log_pre.textContent += `${LogLevel[level]}: ${msg}\n`;
+    }
 }
 
 class Rect {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-}
-
-class CustomInputAreas {
-    mouse: Rect;
-    touch: Rect;
-    pen: Rect;
+    x: number = 0;
+    y: number = 0;
+    w: number = 1;
+    h: number = 1;
 }
 
 class Settings {
     webSocket: WebSocket;
-    checks: Map<string, HTMLInputElement>;
     capturable_select: HTMLSelectElement;
-    frame_rate_input: HTMLInputElement;
-    frame_rate_output: HTMLOutputElement;
-    scale_video_input: HTMLInputElement;
-    scale_video_output: HTMLOutputElement;
-    range_min_pressure: HTMLInputElement;
-    check_aggressive_seek: HTMLInputElement;
-    client_name_input: HTMLInputElement;
-    visible: boolean;
-    custom_input_areas: CustomInputAreas;
-    settings: HTMLElement;
+    stylus_only: HTMLInputElement;
+    lock_aspect_ratio: HTMLInputElement;
+    orientation_select: HTMLSelectElement;
+    canvas_bg_select: HTMLSelectElement;
+    enable_hud: HTMLInputElement;
+    stroke_preview: HTMLInputElement;
+    pressure_curve_preset: HTMLSelectElement;
+    pressure_sensitivity: HTMLInputElement;
+    gamma_out: HTMLOutputElement;
+    min_pressure: HTMLInputElement;
+    settings_panel: HTMLElement;
+    visible: boolean = true;
 
     constructor(webSocket: WebSocket) {
         this.webSocket = webSocket;
-        this.checks = new Map<string, HTMLInputElement>();
         this.capturable_select = document.getElementById("window") as HTMLSelectElement;
-        this.frame_rate_input = document.getElementById("frame_rate") as HTMLInputElement;
-        this.frame_rate_input.min = frame_rate_scale_inv(0).toString();
-        this.frame_rate_input.max = frame_rate_scale_inv(120).toString();
-        this.frame_rate_output = this.frame_rate_input.nextElementSibling as HTMLOutputElement;
-        this.scale_video_input = document.getElementById("scale_video") as HTMLInputElement;
-        this.scale_video_output = this.scale_video_input.nextElementSibling as HTMLOutputElement;
-        this.range_min_pressure = document.getElementById("min_pressure") as HTMLInputElement;
-        this.client_name_input = document.getElementById("client_name") as HTMLInputElement;
-        this.frame_rate_input.oninput = () => {
-            this.frame_rate_output.value = Math.round(frame_rate_scale(this.frame_rate_input.valueAsNumber)).toString();
-        }
-        this.scale_video_input.oninput = () => {
-            let [w, h] = calc_max_video_resolution(this.scale_video_input.valueAsNumber)
-            this.scale_video_output.value = w + "x" + h
-        }
-        this.visible = true;
+        this.stylus_only = document.getElementById("stylus_only") as HTMLInputElement;
+        this.lock_aspect_ratio = document.getElementById("lock_aspect_ratio") as HTMLInputElement;
+        this.orientation_select = document.getElementById("orientation") as HTMLSelectElement;
+        this.canvas_bg_select = document.getElementById("canvas_bg") as HTMLSelectElement;
+        this.enable_hud = document.getElementById("enable_hud") as HTMLInputElement;
+        this.stroke_preview = document.getElementById("stroke_preview") as HTMLInputElement;
+        this.pressure_curve_preset = document.getElementById("pressure_curve_preset") as HTMLSelectElement;
+        this.pressure_sensitivity = document.getElementById("pressure_sensitivity") as HTMLInputElement;
+        this.gamma_out = document.getElementById("gamma_out") as HTMLOutputElement;
+        this.min_pressure = document.getElementById("min_pressure") as HTMLInputElement;
+        this.settings_panel = document.getElementById("settings");
 
-        // Settings UI
-        this.settings = document.getElementById("settings");
-        this.settings.onclick = (e) => e.stopPropagation();
-        let handle = document.getElementById("handle");
+        let btn_toggle = document.getElementById("btn_toggle_sidebar");
+        if (btn_toggle) {
+            btn_toggle.onclick = () => this.toggle();
+        }
 
-        // Settings elements
-        this.settings.querySelectorAll("input[type=checkbox]").forEach(
-            (elem, _key, _parent) => this.checks.set(elem.id, elem as HTMLInputElement)
-        );
+        let btn_close = document.getElementById("btn_close_sidebar");
+        if (btn_close) {
+            btn_close.onclick = () => this.toggle();
+        }
+
+        let lefty = document.getElementById("lefty") as HTMLInputElement;
+        if (lefty) {
+            lefty.onchange = () => {
+                document.body.classList.toggle("lefty", lefty.checked);
+                this.save_settings();
+                if (tabletEngine) tabletEngine.resize();
+            };
+        }
+
+        let fullscreen = document.getElementById("fullscreen");
+        if (fullscreen) {
+            fullscreen.onclick = () => {
+                if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen().catch(() => {});
+                } else {
+                    document.exitFullscreen().catch(() => {});
+                }
+            };
+        }
+
+        let refresh = document.getElementById("refresh");
+        if (refresh) {
+            refresh.onclick = () => this.webSocket.send('"GetCapturableList"');
+        }
+
+        let btn_cycle = document.getElementById("btn_cycle_monitor");
+        if (btn_cycle) {
+            btn_cycle.onclick = () => {
+                let len = this.capturable_select.options.length;
+                if (len > 1) {
+                    this.capturable_select.selectedIndex = (this.capturable_select.selectedIndex + 1) % len;
+                    this.save_and_sync();
+                }
+            };
+        }
+
+        let debug_check = document.getElementById("enable_debug_overlay") as HTMLInputElement;
+        if (debug_check) {
+            debug_check.onchange = () => {
+                let dbg = document.getElementById("debug_overlay");
+                if (dbg) dbg.classList.toggle("hide", !debug_check.checked);
+                this.save_settings();
+            };
+        }
+
+        this.pressure_sensitivity.oninput = () => {
+            this.gamma_out.value = this.pressure_sensitivity.value;
+            this.pressure_curve_preset.value = "custom";
+        };
+
+        this.pressure_curve_preset.onchange = () => {
+            let val = this.pressure_curve_preset.value;
+            if (val === "linear") {
+                this.pressure_sensitivity.value = "1.0";
+            } else if (val === "soft") {
+                this.pressure_sensitivity.value = "1.8";
+            } else if (val === "hard") {
+                this.pressure_sensitivity.value = "0.55";
+            }
+            this.gamma_out.value = this.pressure_sensitivity.value;
+            this.save_and_sync();
+        };
+
+        let auto_sync = () => this.save_and_sync();
+        this.capturable_select.onchange = auto_sync;
+        this.stylus_only.onchange = auto_sync;
+        this.lock_aspect_ratio.onchange = auto_sync;
+        this.orientation_select.onchange = auto_sync;
+        this.canvas_bg_select.onchange = auto_sync;
+        this.enable_hud.onchange = () => {
+            let hud = document.getElementById("hud_overlay");
+            if (hud) hud.classList.toggle("hide", !this.enable_hud.checked);
+            this.save_settings();
+        };
+        this.stroke_preview.onchange = auto_sync;
+        this.pressure_sensitivity.onchange = auto_sync;
+        this.min_pressure.onchange = auto_sync;
 
         this.load_settings();
-
-        // event handling
-
-        // client only
-        handle.onclick = () => { this.toggle() };
-        this.checks.get("lefty").onchange = (e) => {
-            if ((e.target as HTMLInputElement).checked)
-                this.settings.classList.add("lefty");
-            else
-                this.settings.classList.remove("lefty");
-            this.save_settings();
-        }
-
-        document.getElementById("vanish").onclick = () => {
-            this.settings.classList.add("vanish");
-        }
-
-        this.checks.get("stretch").onchange = () => {
-            stretch_video();
-            this.save_settings();
-        };
-
-        this.checks.get("enable_debug_overlay").onchange = (e) => {
-            let enabled = (e.target as HTMLInputElement).checked;
-            if (enabled) {
-                debug_overlay.classList.remove("hide");
-            } else {
-                debug_overlay.classList.add("hide");
-            }
-            this.save_settings();
-        };
-
-        this.check_aggressive_seek = this.checks.get("aggressive_seeking");
-        this.check_aggressive_seek.onchange = () => {
-            this.save_settings();
-        };
-
-        this.checks.get("enable_video").onchange = (e) => {
-            let enabled = (e.target as HTMLInputElement).checked;
-            document.getElementById("video").classList.toggle("vanish", !enabled);
-            document.getElementById("canvas").classList.toggle("vanish", enabled);
-            this.save_settings();
-            if (enabled) {
-                this.webSocket.send('"ResumeVideo"');
-            } else {
-                this.webSocket.send('"PauseVideo"');
-            }
-        }
-
-        let upd_pointer = () => {
-            this.save_settings();
-            new PointerHandler(this.webSocket);
-        }
-        this.checks.get("enable_mouse").onchange = upd_pointer;
-        this.checks.get("enable_stylus").onchange = upd_pointer;
-        this.checks.get("enable_touch").onchange = upd_pointer;
-
-        this.checks.get("energysaving").onchange = (e) => {
-            this.save_settings();
-            this.toggle_energysaving((e.target as HTMLInputElement).checked);
-        };
-
-        this.checks.get("enable_custom_input_areas").onchange = () => {
-            this.save_settings();
-        };
-
-        this.frame_rate_input.onchange = () => this.save_settings();
-        this.range_min_pressure.onchange = () => this.save_settings();
-
-        // server
-        let upd_server_config = () => { this.save_settings(); this.send_server_config() };
-        this.checks.get("uinput_support").onchange = upd_server_config;
-        this.checks.get("capture_cursor").onchange = upd_server_config;
-        this.scale_video_input.onchange = upd_server_config;
-        this.client_name_input.onchange = upd_server_config;
-        this.frame_rate_input.onchange = upd_server_config;
-
-        document.getElementById("refresh").onclick = () => this.webSocket.send('"GetCapturableList"');
-        document.getElementById("custom_input_areas").onclick = () => {
-            this.webSocket.send('"ChooseCustomInputAreas"');
-        };
-        this.capturable_select.onchange = () => this.send_server_config();
-    }
-
-    send_server_config() {
-        let config = new Object(null);
-        config["capturable_id"] = Number(this.capturable_select.value);
-        for (const key of [
-            "uinput_support",
-            "capture_cursor"])
-            config[key] = this.checks.get(key).checked;
-        let [w, h] = calc_max_video_resolution(this.scale_video_input.valueAsNumber);
-        config["max_width"] = w;
-        config["max_height"] = h;
-        config["frame_rate"] = frame_rate_scale(this.frame_rate_input.valueAsNumber);
-        if (this.client_name_input.value)
-            config["client_name"] = this.client_name_input.value;
-        this.webSocket.send(JSON.stringify({ "Config": config }));
-    }
-
-    save_settings() {
-        let settings = Object(null);
-        for (const [key, elem] of this.checks.entries())
-            settings[key] = elem.checked;
-        settings["frame_rate"] = frame_rate_scale(this.frame_rate_input.valueAsNumber).toString();
-        settings["scale_video"] = this.scale_video_input.value;
-        settings["min_pressure"] = this.range_min_pressure.value;
-        settings["custom_input_areas"] = this.custom_input_areas;
-        settings["client_name"] = this.client_name_input.value;
-        localStorage.setItem("settings", JSON.stringify(settings));
-    }
-
-    load_settings() {
-        let settings_string = localStorage.getItem("settings");
-        if (settings_string === null) {
-            this.frame_rate_input.value = frame_rate_scale_inv(30).toString();
-            this.frame_rate_output.value = (30).toString();
-            let [w, h] = calc_max_video_resolution(this.scale_video_input.valueAsNumber)
-            this.scale_video_output.value = w + "x" + h;
-            return;
-        }
-        try {
-            let settings = JSON.parse(settings_string);
-            for (const [key, elem] of this.checks.entries()) {
-                if (typeof settings[key] === "boolean")
-                    elem.checked = settings[key];
-            }
-            let upd_limit = settings["frame_rate"];
-            if (upd_limit)
-                this.frame_rate_input.value = frame_rate_scale_inv(upd_limit).toString();
-            else
-                this.frame_rate_input.value = frame_rate_scale_inv(30).toString();
-            this.frame_rate_output.value = Math.round(frame_rate_scale(this.frame_rate_input.valueAsNumber)).toString();
-
-            let scale_video = settings["scale_video"];
-            if (scale_video)
-                this.scale_video_input.value = scale_video;
-            let [w, h] = calc_max_video_resolution(this.scale_video_input.valueAsNumber);
-            this.scale_video_output.value = w + "x" + h;
-
-            let min_pressure = settings["min_pressure"];
-            if (min_pressure)
-                this.range_min_pressure.value = min_pressure;
-
-            this.custom_input_areas = settings["custom_input_areas"];
-
-            if (this.checks.get("lefty").checked) {
-                this.settings.classList.add("lefty");
-            }
-
-            if (!this.checks.get("enable_video").checked || this.checks.get("energysaving").checked) {
-                this.checks.get("enable_video").checked = false;
-                if (this.checks.get("energysaving").checked)
-                    this.checks.get("enable_video").disabled = true;
-                document.getElementById("video").classList.add("vanish");
-                document.getElementById("canvas").classList.remove("vanish");
-            }
-
-            if (this.checks.get("energysaving").checked) {
-                this.toggle_energysaving(true);
-            }
-
-            if (this.checks.get("enable_debug_overlay").checked) {
-                debug_overlay.classList.remove("hide");
-            }
-
-
-            if (document.getElementById("custom_input_areas").classList.contains("hide")) {
-                this.checks.get("enable_custom_input_areas").checked = false;
-            }
-
-            let client_name = settings["client_name"];
-            if (client_name)
-                this.client_name_input.value = client_name;
-
-        } catch {
-            log(LogLevel.DEBUG, "Failed to load settings.")
-            return;
-        }
-    }
-
-    stretched_video() {
-        return this.checks.get("stretch").checked
-    }
-
-    pointer_types() {
-        let ptrs = [];
-        if (this.checks.get("enable_mouse").checked)
-            ptrs.push("mouse");
-        if (this.checks.get("enable_stylus").checked)
-            ptrs.push("pen");
-        if (this.checks.get("enable_touch").checked)
-            ptrs.push("touch");
-        return ptrs;
     }
 
     toggle() {
-        this.settings.classList.toggle("hide");
         this.visible = !this.visible;
-    }
-
-    onCapturableList(window_names: string[]) {
-        let current_selection = undefined;
-        if (this.capturable_select.selectedOptions[0])
-            current_selection = this.capturable_select.selectedOptions[0].textContent;
-        let new_index: number;
-        this.capturable_select.innerText = "";
-        window_names.forEach((name, i) => {
-            let option = document.createElement("option");
-            option.value = String(i);
-            option.innerText = name;
-            this.capturable_select.appendChild(option);
-            if (name === current_selection)
-                new_index = i;
-        });
-        if (new_index !== undefined)
-            this.capturable_select.value = String(new_index);
-        else if (current_selection)
-            // Can't find the window, so don't select anything
-            this.capturable_select.value = "";
-    }
-
-    toggle_energysaving(energysaving: boolean) {
-        let canvas = fresh_canvas();
-        if (energysaving) {
-            let ctx = canvas.getContext("2d");
-            ctx.fillStyle = "#000";
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        this.settings_panel.classList.toggle("hide", !this.visible);
+        let btn_toggle = document.getElementById("btn_toggle_sidebar");
+        if (btn_toggle) {
+            btn_toggle.style.display = this.visible ? "none" : "flex";
         }
-
-        if (energysaving) {
-            this.checks.get("enable_video").checked = false;
-            this.checks.get("enable_video").disabled = true;
-            this.checks.get("enable_video").dispatchEvent(new Event("change"));
-        } else
-            this.checks.get("enable_video").disabled = false;
-        if (settings)
-            new PointerHandler(this.webSocket);
+        if (tabletEngine) {
+            tabletEngine.resize();
+        }
     }
 
-    video_enabled(): boolean {
-        return this.checks.get("enable_video").checked;
+    save_and_sync() {
+        this.updateTargetMonitorAspect();
+        this.save_settings();
+        this.send_server_config();
+        if (tabletEngine) {
+            tabletEngine.updateVisuals();
+        }
+    }
+
+    updateTargetMonitorAspect() {
+        let opt = this.capturable_select.options[this.capturable_select.selectedIndex];
+        if (opt) {
+            let m = opt.text.match(/(\d+)x(\d+)/);
+            if (m && tabletEngine) {
+                let w = parseInt(m[1], 10);
+                let h = parseInt(m[2], 10);
+                if (w > 0 && h > 0) {
+                    tabletEngine.targetAspectRatio = w / h;
+                    tabletEngine.updateVisuals();
+                }
+            }
+            if (pointerHandler && pointerHandler.hud) {
+                pointerHandler.hud.setMonitor(opt.text);
+            }
+        }
+    }
+
+    send_server_config() {
+        let conf = {
+            capturable_id: Number(this.capturable_select.value) || 0,
+            tablet_mode: true,
+            stylus_only: this.stylus_only.checked,
+            lock_aspect_ratio: this.lock_aspect_ratio.checked,
+            orientation: Number(this.orientation_select.value) || 0,
+            pressure_curve: this.pressure_curve_preset.value,
+            pressure_sensitivity: this.pressure_sensitivity.valueAsNumber || 1.0,
+            max_width: 1920,
+            max_height: 1080,
+            frame_rate: 0,
+            capture_cursor: false,
+        };
+        this.webSocket.send(JSON.stringify({ Config: conf }));
+    }
+
+    save_settings() {
+        let data = {
+            capturable_id: this.capturable_select.value,
+            stylus_only: this.stylus_only.checked,
+            lock_aspect_ratio: this.lock_aspect_ratio.checked,
+            orientation: this.orientation_select.value,
+            canvas_bg: this.canvas_bg_select.value,
+            enable_hud: this.enable_hud.checked,
+            stroke_preview: this.stroke_preview.checked,
+            pressure_curve_preset: this.pressure_curve_preset.value,
+            pressure_sensitivity: this.pressure_sensitivity.value,
+            min_pressure: this.min_pressure.value,
+            lefty: (document.getElementById("lefty") as HTMLInputElement)?.checked || false,
+        };
+        localStorage.setItem("weylus_tablet_settings", JSON.stringify(data));
+        localStorage.setItem("weylus_saved_capturable_id", this.capturable_select.value);
+    }
+
+    load_settings() {
+        let s = localStorage.getItem("weylus_tablet_settings");
+        if (!s) return;
+        try {
+            let data = JSON.parse(s);
+            if (data.lefty !== undefined) {
+                let lefty = document.getElementById("lefty") as HTMLInputElement;
+                if (lefty) {
+                    lefty.checked = data.lefty;
+                    document.body.classList.toggle("lefty", data.lefty);
+                }
+            }
+            if (data.stylus_only !== undefined) this.stylus_only.checked = data.stylus_only;
+            if (data.lock_aspect_ratio !== undefined) this.lock_aspect_ratio.checked = data.lock_aspect_ratio;
+            if (data.orientation !== undefined) this.orientation_select.value = data.orientation;
+            if (data.canvas_bg !== undefined) this.canvas_bg_select.value = data.canvas_bg;
+            if (data.enable_hud !== undefined) {
+                this.enable_hud.checked = data.enable_hud;
+                let hud = document.getElementById("hud_overlay");
+                if (hud) hud.classList.toggle("hide", !data.enable_hud);
+            }
+            if (data.stroke_preview !== undefined) this.stroke_preview.checked = data.stroke_preview;
+            if (data.pressure_curve_preset !== undefined) this.pressure_curve_preset.value = data.pressure_curve_preset;
+            if (data.pressure_sensitivity !== undefined) {
+                this.pressure_sensitivity.value = data.pressure_sensitivity;
+                this.gamma_out.value = data.pressure_sensitivity;
+            }
+            if (data.min_pressure !== undefined) this.min_pressure.value = data.min_pressure;
+        } catch (_) {}
     }
 }
 
-let settings: Settings;
-let debug_overlay: HTMLElement;
-let last_pointer_data: Object;
-
-class PEvent {
-    event_type: string;
-    pointer_id: number;
-    timestamp: number;
-    is_primary: boolean;
-    pointer_type: string;
-    button: number;
-    buttons: number;
+interface StrokePoint {
     x: number;
     y: number;
-    // movement_x: number;
-    // movement_y: number;
     pressure: number;
-    tilt_x: number;
-    tilt_y: number;
-    twist: number;
-    width: number;
-    height: number;
-
-    constructor(eventType: string, event: PointerEvent, targetRect: DOMRect) {
-        let diag_len = Math.sqrt(targetRect.width * targetRect.width + targetRect.height * targetRect.height)
-        this.event_type = eventType.toString();
-        this.pointer_id = event.pointerId;
-        this.timestamp = Math.round(event.timeStamp * 1000);
-        this.is_primary = event.isPrimary;
-        this.pointer_type = event.pointerType;
-        let btn = event.button;
-        // for some reason the secondary and auxiliary buttons are ordered differently for
-        // the button and buttons properties
-        if (btn == 2)
-            btn = 1;
-        else if (btn == 1)
-            btn = 2;
-        this.button = (btn < 0 ? 0 : 1 << btn);
-        this.buttons = event.buttons;
-        let x_offset = 0;
-        let y_offset = 0;
-        let x_scale = 1;
-        let y_scale = 1;
-        if (settings.checks.get("enable_custom_input_areas").checked) {
-            let custom_input_area: Rect = null;
-            if (event.pointerType == "mouse") {
-                custom_input_area = settings.custom_input_areas.mouse;
-            } else if (event.pointerType == "touch") {
-                custom_input_area = settings.custom_input_areas.touch;
-            } else if (event.pointerType == "pen") {
-                custom_input_area = settings.custom_input_areas.pen;
-            }
-            if (custom_input_area) {
-                x_scale = custom_input_area.w;
-                y_scale = custom_input_area.h;
-                x_offset = custom_input_area.x;
-                y_offset = custom_input_area.y;
-            }
-        }
-        this.x = (event.clientX - targetRect.left) / targetRect.width * x_scale + x_offset;
-        this.y = (event.clientY - targetRect.top) / targetRect.height * y_scale + y_offset;
-        // this.movement_x = event.movementX ? event.movementX : 0;
-        // this.movement_y = event.movementY ? event.movementY : 0;
-        this.pressure = Math.max(event.pressure, settings.range_min_pressure.valueAsNumber);
-        this.tilt_x = event.tiltX;
-        this.tilt_y = event.tiltY;
-        this.width = event.width / diag_len;
-        this.height = event.height / diag_len;
-        this.twist = event.twist;
-    }
+    time: number;
 }
 
-class WEvent {
-    dx: number;
-    dy: number;
-    timestamp: number;
-
-    constructor(event: WheelEvent) {
-        /* The WheelEvent can have different scrolling modes that affect how much scrolling
-         * should be done. Unfortunately there is not always a way to accurately convert the scroll
-         * distance into pixels. Thus the following is a guesstimate and scales the WheelEvent's
-         * deltaX/Y values accordingly.
-         */
-        let scale = 1;
-        switch (event.deltaMode) {
-            case 0x01: // DOM_DELTA_LINE
-                scale = 10;
-                break;
-            case 0x02: // DOM_DELTA_PAGE
-                scale = 1000;
-                break;
-            default: // DOM_DELTA_PIXEL
-        }
-        this.dx = Math.round(scale * event.deltaX);
-        this.dy = Math.round(scale * event.deltaY);
-        this.timestamp = Math.round(event.timeStamp * 1000);
-    }
-}
-
-// in milliseconds
-const fade_time = 5000;
-
-const vs_source = `
-  attribute vec3 aVertex;
-  uniform float uTime;
-  varying lowp vec4 vColor;
-
-  void main() {
-    float dt = uTime - aVertex[2];
-    gl_Position = vec4(aVertex[0], aVertex[1], 1.0, 1.0);
-    vColor = vec4(0.0, 170.0/255.0, 1.0, 1.0) * max(1.0 - dt/${fade_time}.0, 0.0);
-  }
-`;
-
-const fs_source = `
-  varying lowp vec4 vColor;
-
-  void main() {
-    gl_FragColor = vColor;
-  }
-`;
-
-class Painter {
+class TabletEngine {
     canvas: HTMLCanvasElement;
-    gl: WebGLRenderingContext;
-
-    /* Store lines currently being drawn.
-     *
-     * Keys are pointerIds, values are an array of the last position (x, y), thickness and event
-     * time and another array with vertices to be used by webgl. Each vertex is made of 3 floats, x
-     * and y coordinates and the event time. Vertices always come in pairs of two. Two such vertices
-     * describe the edges of the line to be drawn with regard to it's thickness. TRIANGLE_STRIP is
-     * then used to connect them and draw an actual line with some thickness depending on the
-     * pressure applied.
-     */
-    lines_active: Map<number, [[number, number, number, number], number[]]>
-
-    // Array of vertices that are not actively drawn anymore and do not need updates, except
-    // removing them after they faded away.
-    lines_old: number[][];
-    vertex_attr: GLint;
-    vertex_buffer: WebGLBuffer;
-    time_attr: WebGLUniformLocation;
-    initialized: boolean;
+    ctx: CanvasRenderingContext2D;
+    activeRect: { x: number; y: number; w: number; h: number } = { x: 0, y: 0, w: 0, h: 0 };
+    targetAspectRatio: number = 16 / 9;
+    strokes: StrokePoint[][] = [];
+    currentStrokes: Map<number, StrokePoint[]> = new Map();
+    fadeDuration: number = 1500; // ms
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
-        canvas.width = window.innerWidth * window.devicePixelRatio;
-        canvas.height = window.innerHeight * window.devicePixelRatio;
-        this.gl = canvas.getContext("webgl");
-        if (this.gl) {
-            this.lines_active = new Map();
-            this.lines_old = [];
-            this.setupWebGL();
-        }
+        this.ctx = canvas.getContext("2d");
+        this.resize();
+        window.addEventListener("resize", () => {
+            this.resize();
+            this.updateVisuals();
+        });
+        requestAnimationFrame(() => this.renderLoop());
     }
 
-    loadShader(type, source): WebGLShader {
-        let gl = this.gl;
-        const shader = gl.createShader(type);
-        gl.shaderSource(shader, source);
-        gl.compileShader(shader);
-        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-            log(LogLevel.WARN, "Failed to compile shaders: " + gl.getShaderInfoLog(shader));
-            gl.deleteShader(shader);
-            return null;
-        }
-        return shader;
+    resize() {
+        let dpr = window.devicePixelRatio || 1;
+        let rect = this.canvas.getBoundingClientRect();
+        this.canvas.width = Math.round(rect.width * dpr);
+        this.canvas.height = Math.round(rect.height * dpr);
+        this.calculateActiveArea();
     }
 
-    setupWebGL() {
-        let gl = this.gl;
-        gl.enable(gl.BLEND);
-        gl.clearColor(0, 0, 0, 0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-
-        const vertex_shader = this.loadShader(gl.VERTEX_SHADER, vs_source);
-        const fragment_shader = this.loadShader(gl.FRAGMENT_SHADER, fs_source);
-        if (!vertex_shader || !fragment_shader)
-            return;
-        const shader_program = gl.createProgram();
-        gl.attachShader(shader_program, vertex_shader);
-        gl.attachShader(shader_program, fragment_shader);
-        gl.linkProgram(shader_program);
-
-        if (!gl.getProgramParameter(shader_program, gl.LINK_STATUS)) {
-            log(LogLevel.WARN, "Unable to initialize the shader program: " + gl.getProgramInfoLog(shader_program));
+    calculateActiveArea() {
+        let cw = this.canvas.width;
+        let ch = this.canvas.height;
+        if (!settings || !settings.lock_aspect_ratio.checked) {
+            this.activeRect = { x: 0, y: 0, w: cw, h: ch };
             return;
         }
-        this.vertex_attr = gl.getAttribLocation(shader_program, "aVertex");
-        this.time_attr = gl.getUniformLocation(shader_program, "uTime");
-        this.vertex_buffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.vertex_buffer);
-        gl.vertexAttribPointer(this.vertex_attr, 3, gl.FLOAT, false, 0, 0);
-        gl.enableVertexAttribArray(this.vertex_attr);
-        gl.useProgram(shader_program);
-        this.initialized = true;
-        requestAnimationFrame(() => this.render());
+
+        let tabletAR = cw / ch;
+        let targetAR = this.targetAspectRatio;
+        let aw = cw;
+        let ah = ch;
+        if (tabletAR > targetAR) {
+            aw = Math.round(ch * targetAR);
+        } else {
+            ah = Math.round(cw / targetAR);
+        }
+        let ax = Math.round((cw - aw) / 2);
+        let ay = Math.round((ch - ah) / 2);
+        this.activeRect = { x: ax, y: ay, w: aw, h: ah };
     }
 
-    render() {
-        // only do work if necessary
-        if (!check_video.checked && (this.lines_active.size > 0 || this.lines_old.length > 0)) {
-            if (this.lines_old.length > 0) {
-                if (performance.now() - this.lines_old[0][this.lines_old[0].length - 1] > fade_time)
-                    this.lines_old.shift();
-            }
-            let gl = this.gl;
-            gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-            gl.clear(gl.COLOR_BUFFER_BIT);
-            gl.uniform1f(this.time_attr, performance.now());
-            gl.bindBuffer(gl.ARRAY_BUFFER, this.vertex_buffer);
-            for (let vertices of this.lines_old) {
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.DYNAMIC_DRAW);
-                gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertices.length / 3)
-            }
-            for (let [_, vertices] of this.lines_active.values()) {
-                // sometimes there are no linesegments because there has been only a single
-                // PointerEvent
-                if (vertices.length == 0)
-                    continue;
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.DYNAMIC_DRAW);
-                gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertices.length / 3)
-            }
-        }
-        requestAnimationFrame(() => this.render());
+    updateVisuals() {
+        this.calculateActiveArea();
     }
 
-    appendEventToLine(event: PointerEvent) {
-        let line = this.lines_active.get(event.pointerId);
-        if (!line) {
-            line = [null, []];
-            this.lines_active.set(event.pointerId, line)
+    addPoint(pointerId: number, x: number, y: number, pressure: number) {
+        if (!settings.stroke_preview.checked) return;
+        let dpr = window.devicePixelRatio || 1;
+        let rect = this.canvas.getBoundingClientRect();
+        let px = (x - rect.left) * dpr;
+        let py = (y - rect.top) * dpr;
+        let pt: StrokePoint = { x: px, y: py, pressure, time: performance.now() };
+        let stroke = this.currentStrokes.get(pointerId);
+        if (!stroke) {
+            stroke = [];
+            this.currentStrokes.set(pointerId, stroke);
         }
-        let max_pixels = Math.max(this.canvas.width, this.canvas.height);
-        let x = event.clientX * window.devicePixelRatio / this.canvas.width * 2 - 1;
-        let y = 1 - event.clientY * window.devicePixelRatio / this.canvas.height * 2;
-        let delta = event.pressure + 0.4;
-        let t = performance.now();
-        // to draw a line segment, there has to be some previous position
-        if (line[0]) {
-            let [x0, y0, delta0, t0] = line[0];
-            // get vector perpendicular to the linesegment to calculate quadrangel around the
-            // segment with appropriate thickness
-            let dx = (y - y0);
-            let dy = -(x - x0);
-            let dd = Math.sqrt(dx ** 2 + dy ** 2);
-            if (dd == 0) {
-                return;
+        stroke.push(pt);
+    }
+
+    endStroke(pointerId: number) {
+        let stroke = this.currentStrokes.get(pointerId);
+        if (stroke && stroke.length > 0) {
+            this.strokes.push(stroke);
+        }
+        this.currentStrokes.delete(pointerId);
+    }
+
+    renderLoop() {
+        let now = performance.now();
+        let ctx = this.ctx;
+        let cw = this.canvas.width;
+        let ch = this.canvas.height;
+
+        ctx.clearRect(0, 0, cw, ch);
+
+        // 1. Draw Active Area Boundary if aspect ratio is locked
+        let ar = this.activeRect;
+        let isLocked = settings && settings.lock_aspect_ratio.checked;
+        if (isLocked && (ar.w < cw || ar.h < ch)) {
+            // Draw dimmed letterbox / pillarbox outside active area
+            ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+            if (ar.x > 0) {
+                ctx.fillRect(0, 0, ar.x, ch);
+                ctx.fillRect(ar.x + ar.w, 0, cw - (ar.x + ar.w), ch);
             }
-            dx = dx / dd * max_pixels / this.canvas.width * 0.004;
-            dy = dy / dd * max_pixels / this.canvas.height * 0.004;
+            if (ar.y > 0) {
+                ctx.fillRect(0, 0, cw, ar.y);
+                ctx.fillRect(0, ar.y + ar.h, cw, ch - (ar.y + ar.h));
+            }
 
-            if (line[1].length == 0)
-                line[1].push(
-                    x0 + delta0 * dx, y0 + delta0 * dy, t0, x0 - delta0 * dx, y0 - delta0 * dy, t0,
-                );
-            line[1].push(
-                x + delta * dx, y + delta * dy, t, x - delta * dx, y - delta * dy, t
-            )
+            // Draw active border
+            ctx.strokeStyle = "rgba(59, 130, 246, 0.5)";
+            ctx.lineWidth = 2 * (window.devicePixelRatio || 1);
+            ctx.strokeRect(ar.x, ar.y, ar.w, ar.h);
+
+            // Draw corner markers
+            let cornerLen = 16 * (window.devicePixelRatio || 1);
+            ctx.strokeStyle = "rgba(59, 130, 246, 0.9)";
+            ctx.lineWidth = 3 * (window.devicePixelRatio || 1);
+            ctx.beginPath();
+            // Top-left
+            ctx.moveTo(ar.x, ar.y + cornerLen);
+            ctx.lineTo(ar.x, ar.y);
+            ctx.lineTo(ar.x + cornerLen, ar.y);
+            // Top-right
+            ctx.moveTo(ar.x + ar.w - cornerLen, ar.y);
+            ctx.lineTo(ar.x + ar.w, ar.y);
+            ctx.lineTo(ar.x + ar.w, ar.y + cornerLen);
+            // Bottom-left
+            ctx.moveTo(ar.x, ar.y + ar.h - cornerLen);
+            ctx.lineTo(ar.x, ar.y + ar.h);
+            ctx.lineTo(ar.x + cornerLen, ar.y + ar.h);
+            // Bottom-right
+            ctx.moveTo(ar.x + ar.w - cornerLen, ar.y + ar.h);
+            ctx.lineTo(ar.x + ar.w, ar.y + ar.h);
+            ctx.lineTo(ar.x + ar.w, ar.y + ar.h - cornerLen);
+            ctx.stroke();
         }
-        line[0] = [x, y, delta, t];
-    }
 
-    onstart(event: PointerEvent) {
-        this.appendEventToLine(event);
-    }
+        // 2. Draw Background Pattern inside active area
+        let bg = settings ? settings.canvas_bg_select.value : "dots";
+        if (bg === "dots" || bg === "grid") {
+            let step = 32 * (window.devicePixelRatio || 1);
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(ar.x, ar.y, ar.w, ar.h);
+            ctx.clip();
 
-    onmove(event: PointerEvent) {
-        if (this.lines_active.has(event.pointerId)) {
-            const events = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event];
-            for (const e of events) {
-                this.appendEventToLine(e);
+            if (bg === "dots") {
+                ctx.fillStyle = "rgba(160, 160, 160, 0.25)";
+                let r = 1.5 * (window.devicePixelRatio || 1);
+                for (let x = ar.x + (step / 2); x < ar.x + ar.w; x += step) {
+                    for (let y = ar.y + (step / 2); y < ar.y + ar.h; y += step) {
+                        ctx.beginPath();
+                        ctx.arc(x, y, r, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+            } else if (bg === "grid") {
+                ctx.strokeStyle = "rgba(160, 160, 160, 0.12)";
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let x = ar.x; x <= ar.x + ar.w; x += step) {
+                    ctx.moveTo(x, ar.y);
+                    ctx.lineTo(x, ar.y + ar.h);
+                }
+                for (let y = ar.y; y <= ar.y + ar.h; y += step) {
+                    ctx.moveTo(ar.x, y);
+                    ctx.lineTo(ar.x + ar.w, y);
+                }
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
+
+        // 3. Draw Fading Pen Strokes Preview
+        if (settings && settings.stroke_preview.checked) {
+            // Filter out fully faded strokes
+            this.strokes = this.strokes.filter(s => {
+                let lastPt = s[s.length - 1];
+                return now - lastPt.time < this.fadeDuration;
+            });
+
+            let allStrokes = [...this.strokes, ...Array.from(this.currentStrokes.values())];
+            ctx.lineCap = "round";
+            ctx.lineJoin = "round";
+
+            for (let stroke of allStrokes) {
+                if (stroke.length < 2) continue;
+                for (let i = 1; i < stroke.length; i++) {
+                    let p0 = stroke[i - 1];
+                    let p1 = stroke[i];
+                    let age = now - p1.time;
+                    let alpha = Math.max(0, 1.0 - (age / this.fadeDuration));
+                    if (alpha <= 0) continue;
+
+                    let avgPressure = (p0.pressure + p1.pressure) / 2;
+                    let width = Math.max(1.5, avgPressure * 8 * (window.devicePixelRatio || 1));
+
+                    ctx.strokeStyle = `rgba(59, 130, 246, ${alpha.toFixed(2)})`;
+                    ctx.lineWidth = width;
+                    ctx.beginPath();
+                    ctx.moveTo(p0.x, p0.y);
+                    ctx.lineTo(p1.x, p1.y);
+                    ctx.stroke();
+                }
             }
         }
+
+        requestAnimationFrame(() => this.renderLoop());
+    }
+}
+
+class HudOverlay {
+    hudMonitor: HTMLElement;
+    hudType: HTMLElement;
+    hudState: HTMLElement;
+    hudPressureVal: HTMLElement;
+    hudPressureBar: HTMLElement;
+    hudCoord: HTMLElement;
+
+    constructor() {
+        this.hudMonitor = document.getElementById("hud_monitor");
+        this.hudType = document.getElementById("hud_type");
+        this.hudState = document.getElementById("hud_state");
+        this.hudPressureVal = document.getElementById("hud_pressure_val");
+        this.hudPressureBar = document.getElementById("hud_pressure_bar");
+        this.hudCoord = document.getElementById("hud_coord");
     }
 
-    onstop(event: PointerEvent) {
-        let lines = this.lines_active.get(event.pointerId);
-        if (lines) {
-            if (lines[1].length > 0)
-                this.lines_old.push(lines[1]);
-            this.lines_active.delete(event.pointerId);
+    setMonitor(name: string) {
+        if (!this.hudMonitor) return;
+        let m = name.match(/Display\s+(\d+)/i);
+        if (m) {
+            this.hudMonitor.textContent = `DISP ${m[1]}`;
+        } else if (name.toLowerCase().includes("all")) {
+            this.hudMonitor.textContent = "ALL";
+        } else {
+            this.hudMonitor.textContent = name.slice(0, 6).toUpperCase();
         }
+    }
+
+    update(pointerType: string, state: string, pressure: number, normX: number, normY: number) {
+        if (!this.hudType) return;
+        this.hudType.textContent = pointerType.toUpperCase();
+        this.hudState.textContent = state.toUpperCase();
+        this.hudState.className = "hud-item";
+        if (state === "contact") this.hudState.classList.add("contact");
+        else if (state === "hover") this.hudState.classList.add("hover");
+        else if (state === "barrel") this.hudState.classList.add("barrel");
+        else if (state === "eraser") this.hudState.classList.add("eraser");
+
+        let pct = Math.round(pressure * 100);
+        this.hudPressureVal.textContent = `${pct}%`;
+        this.hudPressureBar.style.width = `${pct}%`;
+        this.hudCoord.textContent = `X: ${normX.toFixed(3)} | Y: ${normY.toFixed(3)}`;
     }
 }
 
 class PointerHandler {
     webSocket: WebSocket;
-    pointerTypes: string[];
-
-    constructor(webSocket: WebSocket) {
-        let video = document.getElementById("video");
-        let canvas = document.getElementById("canvas");
-        this.webSocket = webSocket;
-        this.pointerTypes = settings.pointer_types();
-
-        video.onpointerdown = (e) => this.onEvent(e, "pointerdown");
-        video.onpointerup = (e) => this.onEvent(e, "pointerup");
-        video.onpointercancel = (e) => this.onEvent(e, "pointercancel");
-        video.onpointermove = (e) => this.onEvent(e, "pointermove");
-        video.onpointerout = (e) => this.onEvent(e, "pointerout");
-        video.onpointerleave = (e) => this.onEvent(e, "pointerleave");
-        video.onpointerenter = (e) => this.onEvent(e, "pointerenter");
-        video.onpointerover = (e) => this.onEvent(e, "pointerover");
-
-        let painter: Painter;
-        if (!settings.checks.get("energysaving").checked)
-            painter = new Painter(canvas as HTMLCanvasElement);
-
-        if (painter && painter.initialized) {
-            canvas.onpointerdown = (e) => { this.onEvent(e, "pointerdown"); painter.onstart(e); };
-            canvas.onpointerup = (e) => { this.onEvent(e, "pointerup"); painter.onstop(e); };
-            canvas.onpointercancel = (e) => { this.onEvent(e, "pointercancel"); painter.onstop(e); };
-            canvas.onpointermove = (e) => { this.onEvent(e, "pointermove"); painter.onmove(e); };
-            canvas.onpointerout = (e) => { this.onEvent(e, "pointerout"); painter.onstop(e); };
-            canvas.onpointerleave = (e) => { this.onEvent(e, "pointerleave"); painter.onstop(e); };
-            canvas.onpointerenter = (e) => { this.onEvent(e, "pointerenter"); painter.onmove(e); };
-            canvas.onpointerover = (e) => { this.onEvent(e, "pointerover"); painter.onmove(e); };
-        } else {
-            canvas.onpointerdown = (e) => this.onEvent(e, "pointerdown");
-            canvas.onpointerup = (e) => this.onEvent(e, "pointerup");
-            canvas.onpointercancel = (e) => this.onEvent(e, "pointercancel");
-            canvas.onpointermove = (e) => this.onEvent(e, "pointermove");
-            canvas.onpointerout = (e) => this.onEvent(e, "pointerout");
-            canvas.onpointerleave = (e) => this.onEvent(e, "pointerleave");
-            canvas.onpointerenter = (e) => this.onEvent(e, "pointerenter");
-            canvas.onpointerover = (e) => this.onEvent(e, "pointerover");
-        }
-
-        // This is a workaround for the following Safari/WebKit bug:
-        // https://bugs.webkit.org/show_bug.cgi?id=217430
-        // I have no idea why this works but it does.
-        video.ontouchmove = (e) => e.preventDefault();
-        canvas.ontouchmove = (e) => e.preventDefault();
-
-        for (let elem of [video, canvas]) {
-            elem.onwheel = (e) => {
-                this.webSocket.send(JSON.stringify({ "WheelEvent": new WEvent(e) }));
-            }
-        }
-    }
-
-    onEvent(event: PointerEvent, event_type: string) {
-        if (settings.checks.get("enable_debug_overlay").checked) {
-            let props = [
-                "altKey",
-                "altitudeAngle",
-                "azimuthAngle",
-                "button",
-                "buttons",
-                "clientX",
-                "clientY",
-                "ctrlKey",
-                "height",
-                "isPrimary",
-                "metaKey",
-                "movementX",
-                "movementY",
-                "offsetX",
-                "offsetY",
-                "pageX",
-                "pageY",
-                "pointerId",
-                "pointerType",
-                "pressure",
-                "screenX",
-                "screenY",
-                "shiftKey",
-                "tangentialPressure",
-                "tiltX",
-                "tiltY",
-                "timeStamp",
-                "twist",
-                "type",
-                "width",
-                "x",
-                "y",
-            ];
-            if (!last_pointer_data) {
-                last_pointer_data = {};
-                for (let prop of props) {
-                    let span_id = `prop_${prop}_span`;
-                    let span = document.getElementById(span_id);
-                    span = document.createElement("span");
-                    span.id = span_id;
-                    debug_overlay.appendChild(span);
-                    debug_overlay.appendChild(document.createElement("br"));
-                }
-            }
-            for (let prop of props) {
-                let span_id = `prop_${prop}_span`;
-                let span = document.getElementById(span_id);
-                let v = event[prop];
-                span.textContent = `${prop}: ${v}`;
-                if (last_pointer_data[prop] == v) {
-                    span.classList.remove("updated");
-                } else {
-                    span.classList.add("updated");
-                    last_pointer_data[prop] = v;
-                }
-            }
-        }
-        if (this.pointerTypes.includes(event.pointerType)) {
-            let rect = (event.target as HTMLElement).getBoundingClientRect();
-            const events = event_type === "pointermove" && typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event];
-            for (let event of events) {
-                this.webSocket.send(
-                    JSON.stringify(
-                        {
-                            "PointerEvent": new PEvent(
-                                event_type,
-                                event,
-                                rect
-                            )
-                        }
-                    )
-                );
-            }
-            if (settings.visible) {
-                settings.toggle();
-            }
-        }
-    }
-}
-
-class KEvent {
-    event_type: string;
-    code: string;
-    key: string;
-    location: number;
-    alt: boolean;
-    ctrl: boolean;
-    shift: boolean;
-    meta: boolean;
-
-    constructor(event_type: string, event: KeyboardEvent) {
-        this.event_type = event_type;
-        this.code = event.code;
-        this.key = event.key;
-        this.location = event.location;
-        this.alt = event.altKey;
-        this.ctrl = event.ctrlKey;
-        this.shift = event.shiftKey;
-        this.meta = event.metaKey;
-    }
-}
-
-class KeyboardHandler {
-    webSocket: WebSocket;
+    canvas: HTMLCanvasElement;
+    hud: HudOverlay;
 
     constructor(webSocket: WebSocket) {
         this.webSocket = webSocket;
+        this.canvas = document.getElementById("tablet_canvas") as HTMLCanvasElement;
+        this.hud = new HudOverlay();
 
-        let d = document;
-        let s = document.getElementById("settings")
+        let handleEvent = (e: PointerEvent, eventType: string) => this.onPointer(e, eventType);
 
-        // Consume all KeyboardEvents, except the settings menu is open.
-        // this avoids making the main/video/canvas element focusable by using
-        // a tabindex which interferes with PointerEvent than can be considered
-        // hovering.
+        this.canvas.onpointerdown = (e) => handleEvent(e, "pointerdown");
+        this.canvas.onpointerup = (e) => handleEvent(e, "pointerup");
+        this.canvas.onpointercancel = (e) => handleEvent(e, "pointercancel");
+        this.canvas.onpointermove = (e) => handleEvent(e, "pointermove");
+        this.canvas.onpointerenter = (e) => handleEvent(e, "pointerenter");
+        this.canvas.onpointerleave = (e) => handleEvent(e, "pointerleave");
+        this.canvas.onpointerover = (e) => handleEvent(e, "pointerover");
+        this.canvas.onpointerout = (e) => handleEvent(e, "pointerout");
 
-        function settings_hidden() {
-            return s.classList.contains("hide") || s.classList.contains("vanish");
-        }
-
-        d.onkeydown = (e) => {
-            if (!settings_hidden())
-                return true;
-            if (e.repeat)
-                return this.onEvent(e, "repeat");
-            return this.onEvent(e, "down");
-        };
-        d.onkeyup = (e) => {
-            if (!settings_hidden())
-                return true;
-            return this.onEvent(e, "up");
-        };
-        d.onkeypress = (e) => {
-            if (!settings_hidden())
-                return true;
-            e.preventDefault();
-            e.stopPropagation();
-            return false;
-        };
+        this.canvas.ontouchmove = (e) => e.preventDefault();
+        this.canvas.oncontextmenu = (e) => e.preventDefault();
     }
 
-    onEvent(event: KeyboardEvent, event_type: string) {
-        this.webSocket.send(JSON.stringify({ "KeyboardEvent": new KEvent(event_type, event) }));
-        event.preventDefault();
-        event.stopPropagation();
-        return false;
-    }
-}
-
-function frame_rate_stats() {
-    let t = performance.now();
-    let fps = Math.round(frame_count / (t - last_fps_calc) * 10000) / 10;
-    fps_out.value = fps.toString();
-    frame_count = 0;
-    last_fps_calc = t;
-    setTimeout(() => frame_rate_stats(), 1500);
-}
-
-function handle_messages(
-    webSocket: WebSocket,
-    video: HTMLVideoElement,
-    onConfigOk: Function,
-    onConfigError: Function,
-    onCapturableList: Function,
-) {
-    let mediaSource: MediaSource = null;
-    let sourceBuffer: SourceBuffer = null;
-    let queue = [];
-    const MAX_BUFFER_LENGTH = 20;  // In seconds
-    function upd_buf() {
-        if (sourceBuffer == null)
-            return;
-        if (!sourceBuffer.updating && queue.length > 0 && mediaSource.readyState == "open") {
-            let buffer_length = 0;
-            if (sourceBuffer.buffered.length) {
-                // Assume only one time range...
-                buffer_length = sourceBuffer.buffered.end(0) - sourceBuffer.buffered.start(0);
-            }
-            if (buffer_length > MAX_BUFFER_LENGTH) {
-                sourceBuffer.remove(0, sourceBuffer.buffered.end(0) - MAX_BUFFER_LENGTH / 2);
-                // This will trigger updateend when finished
-            } else {
-                try {
-                    sourceBuffer.appendBuffer(queue.shift());
-                } catch (err) {
-                    log(LogLevel.DEBUG, "Error appending to sourceBuffer:" + err);
-                    // Drop everything, and try to pick up the stream again
-                    if (sourceBuffer.updating)
-                        sourceBuffer.abort();
-                    sourceBuffer.remove(0, Infinity);
-                }
-            }
-        }
-    }
-    webSocket.onmessage = (event: MessageEvent) => {
-        if (typeof event.data == "string") {
-            let msg = JSON.parse(event.data);
-            if (typeof msg == "string") {
-                if (msg == "NewVideo") {
-                    let MS = window.ManagedMediaSource ? window.ManagedMediaSource : window.MediaSource;
-                    mediaSource = new MS();
-                    sourceBuffer = null;
-                    video.src = URL.createObjectURL(mediaSource);
-                    mediaSource.addEventListener("sourceopen", (_) => {
-                        let mimeType = 'video/mp4; codecs="avc1.4D403D"';
-                        if (!MS.isTypeSupported(mimeType))
-                            mimeType = "video/mp4";
-                        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-                        sourceBuffer.addEventListener("updateend", upd_buf);
-                        // try to recover from errors by restarting the video
-                        if (sourceBuffer.onerror)
-                            sourceBuffer.onerror = () => settings.send_server_config();
-                    })
-                } else if (msg == "ConfigOk") {
-                    onConfigOk();
-                }
-            } else if (typeof msg == "object") {
-                if ("CapturableList" in msg)
-                    onCapturableList(msg["CapturableList"]);
-                else if ("Error" in msg)
-                    alert(msg["Error"]);
-                else if ("ConfigError" in msg) {
-                    onConfigError(msg["ConfigError"]);
-                } else if ("CustomInputAreas" in msg) {
-                    settings.custom_input_areas = msg["CustomInputAreas"];
-                    settings.checks.get("enable_custom_input_areas").checked = true;
-                    settings.save_settings();
-                }
-            }
-
+    onPointer(event: PointerEvent, eventType: string) {
+        // Palm rejection / Stylus only mode filter
+        if (settings.stylus_only.checked && event.pointerType !== "pen") {
             return;
         }
 
-        // not a string -> got a video frame
-        queue.push(event.data);
-        upd_buf();
-        frame_count += 1;
+        let dpr = window.devicePixelRatio || 1;
+        let rect = this.canvas.getBoundingClientRect();
+        let clientX = (event.clientX - rect.left) * dpr;
+        let clientY = (event.clientY - rect.top) * dpr;
 
-        // only seek if there is data available, some browsers choke otherwise
-        if (video.seekable.length > 0) {
-            let seek_time = video.seekable.end(video.seekable.length - 1);
-            if (video.readyState >= (settings.check_aggressive_seek.checked ? 3 : 4)
-                // but make sure to catch up if the video is more than 3 seconds behind
-                || seek_time - video.currentTime > 3) {
-                if (isFinite(seek_time))
-                    video.currentTime = seek_time;
-                else
-                    log(LogLevel.WARN, "Failed to seek to end of video.")
+        let ar = tabletEngine.activeRect;
+        let normX = (clientX - ar.x) / ar.w;
+        let normY = (clientY - ar.y) / ar.h;
+        normX = Math.max(0, Math.min(1, normX));
+        normY = Math.max(0, Math.min(1, normY));
+
+        // Pressure curve & sensitivity mapping
+        let rawPressure = event.pressure;
+        let minP = settings.min_pressure.valueAsNumber || 0;
+        let gamma = settings.pressure_sensitivity.valueAsNumber || 1.0;
+        let pressure = rawPressure;
+        if (pressure > 0) {
+            if (gamma > 0 && Math.abs(gamma - 1.0) > 0.01) {
+                pressure = Math.pow(pressure, 1.0 / gamma);
             }
-
+            pressure = Math.max(minP, Math.min(1.0, pressure));
         }
+
+        // Determine state for HUD
+        let state = "hover";
+        if (event.buttons & 32) state = "eraser";
+        else if (event.buttons & 2) state = "barrel";
+        else if (event.buttons & 1 || eventType === "pointerdown" || pressure > 0) state = "contact";
+        else if (eventType === "pointerleave" || eventType === "pointerout" || eventType === "pointercancel") state = "idle";
+
+        this.hud.update(event.pointerType || "pen", state, pressure, normX, normY);
+
+        if (eventType === "pointerdown" || (eventType === "pointermove" && state === "contact")) {
+            tabletEngine.addPoint(event.pointerId, event.clientX, event.clientY, pressure);
+        } else if (eventType === "pointerup" || eventType === "pointercancel" || eventType === "pointerleave") {
+            tabletEngine.endStroke(event.pointerId);
+        }
+
+        // Forward pointer event to WebSocket
+        let btn = event.button;
+        if (btn === 2) btn = 1;
+        else if (btn === 1) btn = 2;
+        let buttonBit = btn < 0 ? 0 : 1 << btn;
+
+        let payload = {
+            PointerEvent: {
+                event_type: eventType,
+                pointer_id: event.pointerId,
+                timestamp: Math.round(event.timeStamp * 1000),
+                is_primary: event.isPrimary,
+                pointer_type: event.pointerType,
+                button: buttonBit,
+                buttons: event.buttons,
+                x: normX,
+                y: normY,
+                pressure: pressure,
+                tilt_x: event.tiltX || 0,
+                tilt_y: event.tiltY || 0,
+                twist: event.twist || 0,
+                width: event.width || 0,
+                height: event.height || 0,
+            },
+        };
+
+        this.webSocket.send(JSON.stringify(payload));
     }
 }
 
-function check_apis() {
-    let apis = [
-        {
-            attrs: ["MediaSource", "ManagedMediaSource"],
-            msg: "This browser doesn't support MSE/MMS required to playback video stream, try upgrading!"
-        },
-        {
-            attrs: ["PointerEvent"],
-            msg: "This browser doesn't support PointerEvents, input will not work, try upgrading!"
-        },
-    ];
-
-    outer:
-    for (let d of apis) {
-        for (let attr of d.attrs) {
-            if (attr in window) {
-                continue outer;
-            }
-        }
-        log(LogLevel.ERROR, d.msg);
-    }
-}
+let settings: Settings;
+let tabletEngine: TabletEngine;
+let pointerHandler: PointerHandler;
+let activeWs: WebSocket | null = null;
+let reconnectTimer: any = null;
 
 function init() {
-    check_apis();
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+    if (activeWs && (activeWs.readyState === WebSocket.OPEN || activeWs.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
 
-    let protocol = document.location.protocol == "https:" ? "wss://" : "ws://";
-    let webSocket = new WebSocket(
-        protocol + window.location.hostname + ":" +
-        window.location.port + "/ws" + window.location.search
-    );
-    webSocket.binaryType = "arraybuffer";
+    let wsUri = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws${location.search}`;
+    let ws = new WebSocket(wsUri);
+    activeWs = ws;
 
-    debug_overlay = document.getElementById("debug_overlay");
-    settings = new Settings(webSocket);
+    ws.onopen = () => {
+        log(LogLevel.INFO, "Connected to Weylus tablet server");
+        if (!settings) {
+            settings = new Settings(ws);
+        } else {
+            settings.webSocket = ws;
+        }
 
-    let video = document.getElementById("video") as HTMLVideoElement;
-    let canvas = document.getElementById("canvas") as HTMLCanvasElement;
+        if (!tabletEngine) {
+            let canvas = document.getElementById("tablet_canvas") as HTMLCanvasElement;
+            tabletEngine = new TabletEngine(canvas);
+        }
 
-    video.oncontextmenu = function(event) {
-        event.preventDefault();
-        event.stopPropagation();
-        return false;
+        if (!pointerHandler) {
+            pointerHandler = new PointerHandler(ws);
+        } else {
+            pointerHandler.webSocket = ws;
+        }
+
+        ws.send('"GetCapturableList"');
     };
-    canvas.oncontextmenu = function(event) {
-        event.preventDefault();
-        event.stopPropagation();
-        return false;
-    };
 
-    let toggle_fullscreen_btn = document.getElementById("fullscreen") as HTMLButtonElement;
-
-    if (document.exitFullscreen) {
-        toggle_fullscreen_btn.onclick = () => {
-            if (!document.fullscreenElement)
-                document.body.requestFullscreen({ navigationUI: "hide" });
-            else
-                document.exitFullscreen();
-        }
-    } else {
-        // if document.exitFullscreen is not present we are probably running on iOS/iPadOS.
-        // As input is broken in fullscreen mode on these, do not offer fullscreen in the first
-        // place.
-        toggle_fullscreen_btn.parentElement.removeChild(toggle_fullscreen_btn);
-    }
-
-    let handle_disconnect = (msg: string) => {
-        document.body.onclick = video.onclick = (e) => {
-            e.stopPropagation();
-            if (window.confirm(msg + " Reload page?"))
-                location.reload();
-        }
-    }
-    webSocket.onerror = () => handle_disconnect("Lost connection.");
-    webSocket.onclose = () => handle_disconnect("Connection closed.");
-    window.onresize = () => {
-        stretch_video();
-        canvas.width = window.innerWidth * window.devicePixelRatio;
-        canvas.height = window.innerHeight * window.devicePixelRatio;
-        let [w, h] = calc_max_video_resolution(settings.scale_video_input.valueAsNumber);
-        settings.scale_video_output.value = w + "x" + h;
-        settings.send_server_config();
-    }
-    video.controls = false;
-    video.disableRemotePlayback = true;
-    video.onloadeddata = () => stretch_video();
-    let is_connected = false;
-    handle_messages(webSocket, video, () => {
-        if (!is_connected) {
-            new KeyboardHandler(webSocket);
-            new PointerHandler(webSocket);
-            is_connected = true;
-        }
-    },
-        (err) => alert(err),
-        (window_names) => settings.onCapturableList(window_names)
-    );
-    window.onunload = () => { webSocket.close(); }
-    webSocket.onopen = function(event) {
-        webSocket.send('"GetCapturableList"');
-        if (!settings.video_enabled())
-            webSocket.send('"PauseVideo"');
-
-        settings.send_server_config();
-
-        document.onvisibilitychange = () => {
-            if (document.hidden) {
-                webSocket.send('"PauseVideo"');
-            } else if (settings.video_enabled()) {
-                webSocket.send('"ResumeVideo"');
+    ws.onmessage = (e) => {
+        if (typeof e.data !== "string") return;
+        try {
+            let msg = JSON.parse(e.data);
+            if (msg.CapturableList) {
+                let select = document.getElementById("window") as HTMLSelectElement;
+                if (!select) return;
+                select.innerHTML = "";
+                let savedId = localStorage.getItem("weylus_saved_capturable_id");
+                let matchedIdx = -1;
+                msg.CapturableList.forEach((name: string, idx: number) => {
+                    let opt = document.createElement("option");
+                    opt.value = idx.toString();
+                    opt.textContent = name;
+                    select.appendChild(opt);
+                    if (savedId !== null && idx.toString() === savedId) {
+                        matchedIdx = idx;
+                    }
+                });
+                if (matchedIdx >= 0) {
+                    select.selectedIndex = matchedIdx;
+                } else {
+                    select.selectedIndex = 0;
+                }
+                settings.updateTargetMonitorAspect();
+                settings.send_server_config();
+            } else if (msg.ConfigOk) {
+                log(LogLevel.DEBUG, "Server config confirmed");
+            } else if (msg.Error) {
+                log(LogLevel.ERROR, `Server error: ${msg.Error}`);
             }
-        };
-    }
-    frame_rate_stats();
+        } catch (_) {}
+    };
+
+    ws.onerror = () => {
+        log(LogLevel.WARN, "WebSocket error encountered");
+    };
+
+    ws.onclose = () => {
+        log(LogLevel.WARN, "WebSocket disconnected. Reconnecting in 2s...");
+        activeWs = null;
+        reconnectTimer = setTimeout(() => init(), 2000);
+    };
 }
 
-// object-fit: fill; <-- this is unfortunately not supported on iOS, so we use the following
-// workaround
-function stretch_video() {
-    let video = document.getElementById("video") as HTMLVideoElement;
-    if (settings.stretched_video()) {
-        video.style.transform = "scaleX(" + document.body.clientWidth / video.clientWidth + ") scaleY(" + document.body.clientHeight / video.clientHeight + ")";
-    } else {
-        let scale = Math.min(document.body.clientWidth / video.clientWidth, document.body.clientHeight / video.clientHeight);
-        video.style.transform = "scale(" + scale + ")";
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+        if (!activeWs || activeWs.readyState === WebSocket.CLOSED) {
+            init();
+        }
     }
-}
+});

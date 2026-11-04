@@ -3,8 +3,14 @@
     "target": "es2020",
     "lib": ["es2020", "dom", "es6"],
     "module": "commonjs",
+    "rootDir": "ts",
     "outDir": "www/static",
-    "sourceMap": false
+    "sourceMap": false,
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "strictPropertyInitialization": false,
+    "useUnknownInCatchVariables": false
   },
   "include": [
     "ts/**/*.ts"

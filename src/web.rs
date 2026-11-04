@@ -30,6 +30,8 @@ pub enum WebStartUpMessage {
 
 pub enum Web2UiMessage {
     UInputInaccessible,
+    ClientConnected(String),
+    ClientDisconnected,
 }
 
 pub const INDEX_HTML: &str = std::include_str!("../www/templates/index.html");
@@ -167,15 +169,18 @@ async fn serve(
             tokio::spawn(async move {
                 match fut.await {
                     Ok(ws) => {
+                        let _ = sender_ui.send(Web2UiMessage::ClientConnected(addr.to_string())).await;
                         let (sender, receiver) =
                             weylus_websocket_channel(ws, semaphore_websocket_shutdown);
+                        let sender_ui_disconnect = sender_ui.clone();
+                        let sender_ui_uinput = sender_ui.clone();
                         std::thread::spawn(move || {
                             let client = WeylusClientHandler::new(
                                 sender,
                                 receiver,
-                                || {
+                                move || {
                                     if let Err(err) =
-                                        sender_ui.blocking_send(Web2UiMessage::UInputInaccessible)
+                                        sender_ui_uinput.blocking_send(Web2UiMessage::UInputInaccessible)
                                     {
                                         warn!(
                                             "Failed to send message 'UInputInaccessible': {err}."
@@ -186,12 +191,14 @@ async fn serve(
                             );
                             client.run();
                             num_clients.fetch_sub(1, Ordering::Relaxed);
+                            let _ = sender_ui_disconnect.blocking_send(Web2UiMessage::ClientDisconnected);
                             notify_disconnect.notify_waiters();
                         });
                     }
                     Err(err) => {
                         eprintln!("Error in websocket connection: {}", err);
                         num_clients.fetch_sub(1, Ordering::Relaxed);
+                        let _ = sender_ui.send(Web2UiMessage::ClientDisconnected).await;
                         notify_disconnect.notify_waiters();
                     }
                 }

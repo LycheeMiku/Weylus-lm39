@@ -27,7 +27,7 @@ impl CaptrsCapturable {
 
 impl Capturable for CaptrsCapturable {
     fn name(&self) -> String {
-        format!("Desktop {} (captrs)", self.name).into()
+        self.name.clone()
     }
     fn before_input(&mut self) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -70,7 +70,7 @@ impl CaptrsRecorder {
 }
 
 impl Recorder for CaptrsRecorder {
-    fn capture(&mut self) -> Result<crate::video::PixelProvider, Box<dyn Error>> {
+    fn capture(&mut self) -> Result<crate::video::PixelProvider<'_>, Box<dyn Error>> {
         self.capturer
             .capture_store_frame()
             .map_err(|_e| CaptrsError("Captrs failed to capture frame".into()))?;

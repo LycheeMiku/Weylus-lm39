@@ -1,5 +1,6 @@
 use std::boxed::Box;
 use std::error::Error;
+#[allow(unused_imports)]
 use tracing::warn;
 
 #[cfg(target_os = "macos")]
@@ -128,36 +129,43 @@ pub fn get_capturables(
         use crate::capturable::captrs_capture::CaptrsCapturable;
         use crate::capturable::win_ctx::WinCtx;
         let winctx = WinCtx::new();
-        for (i, o) in winctx.get_outputs().iter().enumerate() {
+        let union_rect = winctx.get_union_rect().clone();
+
+        let mut outputs = winctx.get_outputs().clone();
+        // Sort outputs: primary display (DesktopCoordinates.left == 0 && top == 0) first,
+        // then left-to-right, top-to-bottom
+        outputs.sort_by_key(|o| {
+            let is_primary = o.DesktopCoordinates.left == 0 && o.DesktopCoordinates.top == 0;
+            (
+                if is_primary { 0 } else { 1 },
+                o.DesktopCoordinates.left,
+                o.DesktopCoordinates.top,
+            )
+        });
+
+        for (i, o) in outputs.iter().enumerate() {
+            let is_primary = o.DesktopCoordinates.left == 0 && o.DesktopCoordinates.top == 0;
+            let w = (o.DesktopCoordinates.right - o.DesktopCoordinates.left).abs();
+            let h = (o.DesktopCoordinates.bottom - o.DesktopCoordinates.top).abs();
+            let primary_tag = if is_primary { " [Primary]" } else { "" };
             let captr = CaptrsCapturable::new(
-                i as u8,
-                String::from_utf16_lossy(o.DeviceName.as_ref()),
+                (i + 1) as u8,
+                format!("Display {} ({}x{}){}", i + 1, w, h, primary_tag),
                 o.DesktopCoordinates,
-                winctx.get_union_rect().clone(),
+                union_rect,
             );
             capturables.push(Box::new(captr));
         }
-    }
 
-    if crate::log::get_log_level() >= tracing::Level::DEBUG {
-        for (width, height) in [
-            (200, 200),
-            (800, 600),
-            (1080, 720),
-            (1920, 1080),
-            (3840, 2160),
-            (15360, 2160),
-        ]
-        .iter()
-        {
-            use testsrc::PixelFormat;
-            for pixel_format in [PixelFormat::BGR0, PixelFormat::RGB0, PixelFormat::RGB] {
-                capturables.push(Box::new(testsrc::TestCapturable {
-                    width: *width,
-                    height: *height,
-                    pixel_format,
-                }));
-            }
+        if outputs.len() > 1 {
+            let total_w = (union_rect.right - union_rect.left).abs();
+            let total_h = (union_rect.bottom - union_rect.top).abs();
+            capturables.push(Box::new(CaptrsCapturable::new(
+                0,
+                format!("All Displays ({}x{} Span)", total_w, total_h),
+                union_rect,
+                union_rect,
+            )));
         }
     }
 
