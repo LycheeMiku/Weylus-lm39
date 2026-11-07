@@ -98,6 +98,77 @@ fn open_url(url: &str) {
     }
 }
 
+fn confirm_dialog(parent: &Window, title: &str, message: &str) -> bool {
+    let w = 420;
+    let h = 140;
+    let px = parent.x() + (parent.w() - w).max(0) / 2;
+    let py = parent.y() + (parent.h() - h).max(0) / 2;
+
+    let mut win = Window::default()
+        .with_pos(px, py)
+        .with_size(w, h)
+        .with_label(title);
+    win.make_modal(true);
+    win.set_xclass("weylus");
+
+    let mut frame = Frame::default()
+        .with_pos(20, 20)
+        .with_size(w - 40, 50)
+        .with_label(message);
+    frame.set_label_size(13);
+
+    let confirmed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let mut btn_cancel = Button::default()
+        .with_pos(w - 180, h - 45)
+        .with_size(75, 28)
+        .with_label("Cancel");
+
+    let mut btn_ok = Button::default()
+        .with_pos(w - 95, h - 45)
+        .with_size(75, 28)
+        .with_label("OK");
+
+    win.end();
+    win.show();
+
+    let mut win_close = win.clone();
+    btn_cancel.set_callback(move |_| {
+        win_close.hide();
+    });
+
+    let mut win_close2 = win.clone();
+    let confirmed_clone = confirmed.clone();
+    btn_ok.set_callback(move |_| {
+        confirmed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        win_close2.hide();
+    });
+
+    let confirmed_clone2 = confirmed.clone();
+    let mut win_close3 = win.clone();
+    win.handle(move |_w, ev| match ev {
+        fltk::enums::Event::KeyDown => {
+            if fltk::app::event_key() == fltk::enums::Key::Enter {
+                confirmed_clone2.store(true, std::sync::atomic::Ordering::SeqCst);
+                win_close3.hide();
+                true
+            } else if fltk::app::event_key() == fltk::enums::Key::Escape {
+                win_close3.hide();
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    });
+
+    while win.shown() {
+        fltk::app::wait();
+    }
+
+    confirmed.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     let width = 170;
     let height = 24;
@@ -111,7 +182,21 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
         .center_screen()
         .with_label(&format!("Weylus - Graphics Tablet v{}", env!("CARGO_PKG_VERSION")));
     wind.set_xclass("weylus");
-    wind.set_callback(move |_win| app.quit());
+
+    let is_server_running = Arc::new(AtomicBool::new(false));
+    {
+        let is_server_running = is_server_running.clone();
+        wind.set_callback(move |win| {
+            if is_server_running.load(std::sync::atomic::Ordering::SeqCst) {
+                if confirm_dialog(win, "Exit Confirmation", "Server is currently running. Are you sure you want to exit?") {
+                    app.quit();
+                }
+            } else {
+                app.quit();
+            }
+        });
+    }
+
     wind.size_range(660, initial_height, 660, if config.enable_log { 0 } else { 304 });
 
     // Left Column: Server settings & control
@@ -170,7 +255,7 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     let mut but_upstream = Button::default()
         .with_pos(20, 212)
         .with_size(270, 22)
-        .with_label("🔗 原项目: github.com/H-M-H/Weylus");
+        .with_label("🔗 Upstream: github.com/H-M-H/Weylus");
     but_upstream.set_frame(FrameType::FlatBox);
     but_upstream.set_label_size(11);
     but_upstream.set_label_color(Color::from_rgb(37, 99, 235));
@@ -338,7 +423,6 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
     }
 
     let mut weylus = crate::weylus::Weylus::new();
-    let mut is_server_running = false;
     let auto_start = config.auto_start;
     let current_url = Arc::new(Mutex::new(String::new()));
     let config = Arc::new(Mutex::new(config.clone()));
@@ -421,11 +505,13 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
         let mut status_frame = status_frame.clone();
         let mut output_server_addr = output_server_addr.clone();
         let mut qr_frame = qr_frame.clone();
+        let is_server_running = is_server_running.clone();
+        let wind = wind.clone();
 
         move |but: &mut Button| {
             if let Err(err) = || -> Result<(), Box<dyn std::error::Error>> {
                 let mut config = config.lock().unwrap();
-                if !is_server_running {
+                if !is_server_running.load(std::sync::atomic::Ordering::SeqCst) {
                     let access_code_string = input_access_code.value();
                     let access_code = match access_code_string.as_str() {
                         "" => None,
@@ -483,7 +569,7 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                     }) {
                         return Ok(());
                     }
-                    is_server_running = true;
+                    is_server_running.store(true, std::sync::atomic::Ordering::SeqCst);
 
                     write_config(&config);
 
@@ -511,6 +597,9 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                     but.set_label("Stop");
                     info!("Weylus Graphics Tablet server started on {}", url_string);
                 } else {
+                    if !confirm_dialog(&wind, "Stop Server Confirmation", "Server is currently running. Are you sure you want to stop it?") {
+                        return Ok(());
+                    }
                     weylus.stop();
                     but.set_label("Start");
                     qr_frame.set_image(None::<PngImage>);
@@ -520,7 +609,7 @@ pub fn run(config: &Config, log_receiver: mpsc::Receiver<String>) {
                     status_frame.set_label_color(Color::from_rgb(160, 160, 160));
                     status_frame.redraw();
                     *current_url.lock().unwrap() = String::new();
-                    is_server_running = false;
+                    is_server_running.store(false, std::sync::atomic::Ordering::SeqCst);
                 }
                 Ok(())
             }() {

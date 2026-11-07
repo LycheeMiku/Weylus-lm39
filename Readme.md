@@ -43,7 +43,7 @@
 
 ## 🚀 快速上手 (Windows)
 
-1. 前往 [Releases 页面](https://github.com/LycheeMiku/Weylus-lm39/releases) 下载最新版的预编译压缩包 `weylus-windows-x64-v0.11.4.zip`。
+1. 前往 [Releases 页面](https://github.com/LycheeMiku/Weylus-lm39/releases) 下载最新版的预编译压缩包 `weylus-windows-x64-v1.0.1.zip`。
 2. 解压并直接双击运行 `weylus.exe`。
 3. 确保 iPad / 平板与电脑连接在**同一局域网**（Wi-Fi 或通过 USB 数据线共享网络）。
 4. 在 iPad 上使用相机扫描客户端上的二维码，或在 Safari 中直接打开提示的地址（如 `http://192.168.x.x:1701`）。
