@@ -293,7 +293,12 @@ async fn run_server(
         let (tcp, remote_address) = tokio::select! {
             res = listener.accept() => {
                 match res {
-                    Ok(conn) => conn,
+                    Ok((tcp, addr)) => {
+                        if let Err(err) = tcp.set_nodelay(true) {
+                            warn!("Failed to set TCP_NODELAY: {err}");
+                        }
+                        (tcp, addr)
+                    }
                     Err(err) => {
                         warn!("Connection failed: {err}.");
                         continue;

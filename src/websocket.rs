@@ -10,8 +10,8 @@ use tracing::{error, trace, warn};
 use crate::capturable::{get_capturables, Capturable};
 use crate::input::device::InputDevice;
 use crate::protocol::{
-    ClientConfiguration, KeyboardEvent, MessageInbound, MessageOutbound, PointerEvent,
-    WeylusReceiver, WeylusSender, WheelEvent,
+    Button, ClientConfiguration, KeyboardEvent, MessageInbound, MessageOutbound, PointerEvent,
+    PointerEventType, PointerType, WeylusReceiver, WeylusSender, WheelEvent,
 };
 
 #[allow(dead_code)]
@@ -393,6 +393,53 @@ impl WeylusSender for WsWeylusSender {
     }
 }
 
+fn decode_binary_pointer_event(chunk: &[u8]) -> PointerEvent {
+    let event_type = match chunk[0] {
+        1 => PointerEventType::DOWN,
+        2 => PointerEventType::UP,
+        3 => PointerEventType::MOVE,
+        4 => PointerEventType::CANCEL,
+        5 => PointerEventType::ENTER,
+        6 => PointerEventType::LEAVE,
+        7 => PointerEventType::OVER,
+        8 => PointerEventType::OUT,
+        _ => PointerEventType::MOVE,
+    };
+    let pointer_type = match chunk[1] {
+        1 => PointerType::Pen,
+        2 => PointerType::Touch,
+        3 => PointerType::Mouse,
+        _ => PointerType::Unknown,
+    };
+    let pointer_id = u16::from_le_bytes([chunk[2], chunk[3]]) as i64;
+    let buttons = Button::from_bits_truncate(chunk[4]);
+    let button = Button::from_bits_truncate(chunk[5]);
+    let x = (u16::from_le_bytes([chunk[6], chunk[7]]) as f64) / 65535.0;
+    let y = (u16::from_le_bytes([chunk[8], chunk[9]]) as f64) / 65535.0;
+    let pressure = (u16::from_le_bytes([chunk[10], chunk[11]]) as f64) / 65535.0;
+    let tilt_x = (chunk[12] as i8) as i32;
+    let tilt_y = (chunk[13] as i8) as i32;
+    let timestamp_ms = u32::from_le_bytes([chunk[14], chunk[15], chunk[16], chunk[17]]) as u64;
+
+    PointerEvent {
+        event_type,
+        pointer_id,
+        timestamp: timestamp_ms * 1000,
+        is_primary: true,
+        pointer_type,
+        button,
+        buttons,
+        x,
+        y,
+        pressure,
+        tilt_x,
+        tilt_y,
+        twist: 0,
+        width: 0.0,
+        height: 0.0,
+    }
+}
+
 pub fn weylus_websocket_channel(
     websocket: WebSocket<TokioIo<Upgraded>>,
     semaphore_shutdown: Arc<tokio::sync::Semaphore>,
@@ -401,8 +448,8 @@ pub fn weylus_websocket_channel(
 
     let mut rx = FragmentCollectorRead::new(rx);
 
-    let (sender_inbound, receiver_inbound) = channel::<MessageInbound>(32);
-    let (sender_outbound, mut receiver_outbound) = channel::<WsMessage>(32);
+    let (sender_inbound, receiver_inbound) = channel::<MessageInbound>(512);
+    let (sender_outbound, mut receiver_outbound) = channel::<WsMessage>(512);
 
     {
         let sender_outbound = sender_outbound.clone();
@@ -437,6 +484,20 @@ pub fn weylus_websocket_channel(
                         }
                         Err(err) => warn!("Failed to parse message: {err}"),
                     },
+                    OpCode::Binary => {
+                        let payload = &frame.payload;
+                        if payload.len() % 18 == 0 && !payload.is_empty() {
+                            for chunk in payload.chunks_exact(18) {
+                                let event = decode_binary_pointer_event(chunk);
+                                if let Err(err) = sender_inbound.send(MessageInbound::PointerEvent(event)).await {
+                                    warn!("Failed to forward binary pointer event to WeylusClientHandler: {err}.");
+                                    break;
+                                }
+                            }
+                        } else {
+                            warn!("Received binary frame with unexpected length: {}", payload.len());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -490,4 +551,43 @@ pub fn weylus_websocket_channel(
             recv: receiver_inbound,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_binary_pointer_event() {
+        let mut chunk = [0u8; 18];
+        chunk[0] = 3; // MOVE
+        chunk[1] = 1; // Pen
+        chunk[2] = 42; // pointer_id = 42
+        chunk[3] = 0;
+        chunk[4] = 1; // buttons = PRIMARY
+        chunk[5] = 1; // button = PRIMARY
+        let x_u16 = 32768u16;
+        chunk[6..8].copy_from_slice(&x_u16.to_le_bytes());
+        let y_u16 = 16384u16;
+        chunk[8..10].copy_from_slice(&y_u16.to_le_bytes());
+        let p_u16 = 49151u16;
+        chunk[10..12].copy_from_slice(&p_u16.to_le_bytes());
+        chunk[12] = 15; // tilt_x = 15
+        chunk[13] = (-20i8) as u8; // tilt_y = -20
+        let ts_u32 = 123456u32;
+        chunk[14..18].copy_from_slice(&ts_u32.to_le_bytes());
+
+        let ev = decode_binary_pointer_event(&chunk);
+        assert_eq!(ev.event_type, PointerEventType::MOVE);
+        assert_eq!(ev.pointer_type, PointerType::Pen);
+        assert_eq!(ev.pointer_id, 42);
+        assert_eq!(ev.buttons, Button::PRIMARY);
+        assert_eq!(ev.button, Button::PRIMARY);
+        assert!((ev.x - 0.5).abs() < 0.001);
+        assert!((ev.y - 0.25).abs() < 0.001);
+        assert!((ev.pressure - 0.75).abs() < 0.001);
+        assert_eq!(ev.tilt_x, 15);
+        assert_eq!(ev.tilt_y, -20);
+        assert_eq!(ev.timestamp, 123456000);
+    }
 }

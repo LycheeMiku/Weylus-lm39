@@ -536,6 +536,29 @@ class HudOverlay {
     }
 }
 
+function eventTypeToByte(t: string): number {
+    switch (t) {
+        case "pointerdown": return 1;
+        case "pointerup": return 2;
+        case "pointermove": return 3;
+        case "pointercancel": return 4;
+        case "pointerenter": return 5;
+        case "pointerleave": return 6;
+        case "pointerover": return 7;
+        case "pointerout": return 8;
+        default: return 3;
+    }
+}
+
+function pointerTypeToByte(t: string): number {
+    switch (t) {
+        case "pen": return 1;
+        case "touch": return 2;
+        case "mouse": return 3;
+        default: return 0;
+    }
+}
+
 class PointerHandler {
     webSocket: WebSocket;
     canvas: HTMLCanvasElement;
@@ -569,69 +592,85 @@ class PointerHandler {
 
         let dpr = window.devicePixelRatio || 1;
         let rect = this.canvas.getBoundingClientRect();
-        let clientX = (event.clientX - rect.left) * dpr;
-        let clientY = (event.clientY - rect.top) * dpr;
-
         let ar = tabletEngine.activeRect;
-        let normX = (clientX - ar.x) / ar.w;
-        let normY = (clientY - ar.y) / ar.h;
-        normX = Math.max(0, Math.min(1, normX));
-        normY = Math.max(0, Math.min(1, normY));
-
-        // Pressure curve & sensitivity mapping
-        let rawPressure = event.pressure;
         let minP = settings.min_pressure.valueAsNumber || 0;
         let gamma = settings.pressure_sensitivity.valueAsNumber || 1.0;
-        let pressure = rawPressure;
-        if (pressure > 0) {
-            if (gamma > 0 && Math.abs(gamma - 1.0) > 0.01) {
-                pressure = Math.pow(pressure, 1.0 / gamma);
+
+        // Collect coalesced events if available for pointermove, else single event
+        let rawEvents: PointerEvent[] = [];
+        if (eventType === "pointermove" && typeof (event as any).getCoalescedEvents === "function") {
+            try {
+                rawEvents = (event as any).getCoalescedEvents();
+            } catch (_) {}
+        }
+        if (!rawEvents || rawEvents.length === 0) {
+            rawEvents = [event];
+        }
+
+        let count = rawEvents.length;
+        let buffer = new ArrayBuffer(count * 18);
+        let view = new DataView(buffer);
+
+        for (let i = 0; i < count; i++) {
+            let ev = rawEvents[i];
+            let clientX = (ev.clientX - rect.left) * dpr;
+            let clientY = (ev.clientY - rect.top) * dpr;
+
+            let normX = (clientX - ar.x) / ar.w;
+            let normY = (clientY - ar.y) / ar.h;
+            normX = Math.max(0, Math.min(1, normX));
+            normY = Math.max(0, Math.min(1, normY));
+
+            // Pressure curve & sensitivity mapping
+            let rawPressure = ev.pressure;
+            let pressure = rawPressure;
+            if (pressure > 0) {
+                if (gamma > 0 && Math.abs(gamma - 1.0) > 0.01) {
+                    pressure = Math.pow(pressure, 1.0 / gamma);
+                }
+                pressure = Math.max(minP, Math.min(1.0, pressure));
             }
-            pressure = Math.max(minP, Math.min(1.0, pressure));
+
+            // Determine state for HUD
+            let state = "hover";
+            if (ev.buttons & 32) state = "eraser";
+            else if (ev.buttons & 2) state = "barrel";
+            else if (ev.buttons & 1 || eventType === "pointerdown" || pressure > 0) state = "contact";
+            else if (eventType === "pointerleave" || eventType === "pointerout" || eventType === "pointercancel") state = "idle";
+
+            // Update HUD on last event in batch
+            if (i === count - 1) {
+                this.hud.update(ev.pointerType || "pen", state, pressure, normX, normY);
+            }
+
+            if (eventType === "pointerdown" || (eventType === "pointermove" && state === "contact")) {
+                tabletEngine.addPoint(ev.pointerId, ev.clientX, ev.clientY, pressure);
+            } else if (eventType === "pointerup" || eventType === "pointercancel" || eventType === "pointerleave") {
+                tabletEngine.endStroke(ev.pointerId);
+            }
+
+            let btn = ev.button;
+            if (btn === 2) btn = 1;
+            else if (btn === 1) btn = 2;
+            let buttonBit = btn < 0 ? 0 : 1 << btn;
+
+            let offset = i * 18;
+            view.setUint8(offset + 0, eventTypeToByte(eventType));
+            view.setUint8(offset + 1, pointerTypeToByte(ev.pointerType));
+            view.setUint16(offset + 2, ev.pointerId & 0xFFFF, true);
+            view.setUint8(offset + 4, ev.buttons & 0xFF);
+            view.setUint8(offset + 5, buttonBit & 0xFF);
+            view.setUint16(offset + 6, Math.max(0, Math.min(65535, Math.round(normX * 65535))), true);
+            view.setUint16(offset + 8, Math.max(0, Math.min(65535, Math.round(normY * 65535))), true);
+            view.setUint16(offset + 10, Math.max(0, Math.min(65535, Math.round(pressure * 65535))), true);
+            view.setInt8(offset + 12, Math.max(-128, Math.min(127, Math.round(ev.tiltX || 0))));
+            view.setInt8(offset + 13, Math.max(-128, Math.min(127, Math.round(ev.tiltY || 0))));
+            view.setUint32(offset + 14, Math.round(ev.timeStamp) & 0xFFFFFFFF, true);
         }
 
-        // Determine state for HUD
-        let state = "hover";
-        if (event.buttons & 32) state = "eraser";
-        else if (event.buttons & 2) state = "barrel";
-        else if (event.buttons & 1 || eventType === "pointerdown" || pressure > 0) state = "contact";
-        else if (eventType === "pointerleave" || eventType === "pointerout" || eventType === "pointercancel") state = "idle";
-
-        this.hud.update(event.pointerType || "pen", state, pressure, normX, normY);
-
-        if (eventType === "pointerdown" || (eventType === "pointermove" && state === "contact")) {
-            tabletEngine.addPoint(event.pointerId, event.clientX, event.clientY, pressure);
-        } else if (eventType === "pointerup" || eventType === "pointercancel" || eventType === "pointerleave") {
-            tabletEngine.endStroke(event.pointerId);
+        if (this.webSocket.readyState === WebSocket.OPEN) {
+            this.webSocket.send(buffer);
         }
-
-        // Forward pointer event to WebSocket
-        let btn = event.button;
-        if (btn === 2) btn = 1;
-        else if (btn === 1) btn = 2;
-        let buttonBit = btn < 0 ? 0 : 1 << btn;
-
-        let payload = {
-            PointerEvent: {
-                event_type: eventType,
-                pointer_id: event.pointerId,
-                timestamp: Math.round(event.timeStamp * 1000),
-                is_primary: event.isPrimary,
-                pointer_type: event.pointerType,
-                button: buttonBit,
-                buttons: event.buttons,
-                x: normX,
-                y: normY,
-                pressure: pressure,
-                tilt_x: event.tiltX || 0,
-                tilt_y: event.tiltY || 0,
-                twist: event.twist || 0,
-                width: event.width || 0,
-                height: event.height || 0,
-            },
-        };
-
-        this.webSocket.send(JSON.stringify(payload));
     }
 }
 
@@ -652,6 +691,7 @@ function init() {
 
     let wsUri = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws${location.search}`;
     let ws = new WebSocket(wsUri);
+    ws.binaryType = "arraybuffer";
     activeWs = ws;
 
     ws.onopen = () => {
